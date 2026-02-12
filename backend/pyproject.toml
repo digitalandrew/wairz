@@ -1,0 +1,28 @@
+[project]
+name = "wairz-backend"
+version = "0.1.0"
+description = "Wairz - AI-Assisted Firmware Reverse Engineering & Security Assessment"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "pydantic-settings>=2.0.0",
+    "python-multipart>=0.0.9",
+    "python-magic>=0.4.27",
+    "pyelftools>=0.31",
+    "aiofiles>=24.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
