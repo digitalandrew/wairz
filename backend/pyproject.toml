@@ -14,6 +14,7 @@ dependencies = [
     "python-magic>=0.4.27",
     "pyelftools>=0.31",
     "aiofiles>=24.0.0",
+    "anthropic>=0.79.0",
 ]
 
 [tool.pytest.ini_options]
