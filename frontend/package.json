@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.1.18",
     "axios": "^1.13.5",
     "class-variance-authority": "^0.7.1",
@@ -17,6 +18,7 @@
     "lucide-react": "^0.564.0",
     "radix-ui": "^1.4.3",
     "react": "^19.2.0",
+    "react-arborist": "^3.4.3",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.0",
     "tailwind-merge": "^3.4.0",
