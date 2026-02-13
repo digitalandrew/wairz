@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import files, firmware, projects
+from app.routers import chat, files, firmware, projects
 
 
 @asynccontextmanager
@@ -32,6 +32,7 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(firmware.router)
 app.include_router(files.router)
+app.include_router(chat.router)
 
 
 @app.get("/health")
