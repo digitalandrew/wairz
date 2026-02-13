@@ -1,15 +1,22 @@
-import { useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { FolderTree } from 'lucide-react'
 import { useExplorerStore } from '@/stores/explorerStore'
+import { useChatStore } from '@/stores/chatStore'
 import FileTree from '@/components/explorer/FileTree'
 import FileViewer from '@/components/explorer/FileViewer'
+import ChatPanel from '@/components/chat/ChatPanel'
 
 export default function ExplorePage() {
-  const reset = useExplorerStore((s) => s.reset)
+  const resetExplorer = useExplorerStore((s) => s.reset)
+  const resetChat = useChatStore((s) => s.reset)
+  const [chatOpen, setChatOpen] = useState(false)
 
   useEffect(() => {
-    return () => reset()
-  }, [reset])
+    return () => {
+      resetExplorer()
+      resetChat()
+    }
+  }, [resetExplorer, resetChat])
 
   return (
     <div className="-m-6 flex h-[calc(100vh-3.5rem)]">
@@ -22,10 +29,18 @@ export default function ExplorePage() {
         <FileTree />
       </div>
 
-      {/* Right panel: file viewer */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* Center panel: file viewer */}
+      <div className="relative flex min-w-0 flex-1 flex-col">
         <FileViewer />
+        {!chatOpen && (
+          <ChatPanel isOpen={false} onToggle={() => setChatOpen(true)} />
+        )}
       </div>
+
+      {/* Right panel: chat */}
+      {chatOpen && (
+        <ChatPanel isOpen={true} onToggle={() => setChatOpen(false)} />
+      )}
     </div>
   )
 }

@@ -66,3 +66,33 @@ export interface SearchResult {
   matches: string[]
   truncated: boolean
 }
+
+// ── Chat types ──
+
+export interface Conversation {
+  id: string
+  project_id: string
+  title: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ConversationDetail extends Conversation {
+  messages: Record<string, unknown>[]
+}
+
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
+
+export type ChatDisplayMessage =
+  | { id: string; kind: 'user'; content: string }
+  | { id: string; kind: 'assistant_text'; content: string }
+  | { id: string; kind: 'tool_call'; tool: string; toolUseId: string; input: Record<string, unknown> }
+  | { id: string; kind: 'tool_result'; tool: string; toolUseId: string; output: string; isError?: boolean }
+  | { id: string; kind: 'error'; content: string }
+
+export type WSEvent =
+  | { type: 'assistant_text'; content: string; delta: boolean }
+  | { type: 'tool_call'; tool: string; tool_use_id: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool: string; tool_use_id: string; output: string }
+  | { type: 'error'; content: string }
+  | { type: 'done' }
