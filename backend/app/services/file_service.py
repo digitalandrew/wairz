@@ -1,3 +1,4 @@
+import base64
 import fnmatch
 import hashlib
 import os
@@ -29,6 +30,7 @@ class FileContent:
     is_binary: bool
     size: int
     truncated: bool = False
+    encoding: str = "utf-8"
 
 
 @dataclass
@@ -125,8 +127,18 @@ class FileService:
 
         return entries, truncated
 
-    def read_file(self, path: str, offset: int = 0, length: int | None = None) -> FileContent:
-        """Read file contents. Auto-detects binary vs text."""
+    def read_file(
+        self,
+        path: str,
+        offset: int = 0,
+        length: int | None = None,
+        format: str = "auto",
+    ) -> FileContent:
+        """Read file contents. Auto-detects binary vs text.
+
+        format: "auto" (default) — hex dump for binary, utf-8 for text
+                "base64" — raw bytes as base64 string
+        """
         full_path = self._validate(path)
 
         if not os.path.isfile(full_path):
@@ -140,18 +152,31 @@ class FileService:
             data = f.read(read_length)
 
         truncated = (offset + len(data)) < file_size
+
+        if format == "base64":
+            return FileContent(
+                content=base64.b64encode(data).decode("ascii"),
+                is_binary=True,
+                size=file_size,
+                truncated=truncated,
+                encoding="base64",
+            )
+
         binary = _is_binary(data)
 
         if binary:
             content = _hex_dump(data, offset)
+            encoding = "hex"
         else:
             content = data.decode("utf-8", errors="replace")
+            encoding = "utf-8"
 
         return FileContent(
             content=content,
             is_binary=binary,
             size=file_size,
             truncated=truncated,
+            encoding=encoding,
         )
 
     def file_info(self, path: str) -> FileInfo:

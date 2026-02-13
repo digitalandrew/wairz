@@ -46,10 +46,11 @@ async def read_file(
     path: str = Query(..., description="File path to read"),
     offset: int = Query(0, ge=0, description="Byte offset to start reading from"),
     length: int | None = Query(None, ge=1, description="Number of bytes to read"),
+    format: str = Query("auto", description="Response format: auto, base64"),
     service: FileService = Depends(get_file_service),
 ):
     try:
-        content = service.read_file(path, offset, length)
+        content = service.read_file(path, offset, length, format=format)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     return dataclasses.asdict(content)

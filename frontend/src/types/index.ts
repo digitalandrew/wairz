@@ -48,6 +48,7 @@ export interface FileContent {
   is_binary: boolean
   size: number
   truncated: boolean
+  encoding?: string
 }
 
 export interface FileInfo {

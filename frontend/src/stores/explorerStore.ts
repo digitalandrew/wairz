@@ -2,6 +2,13 @@ import { create } from 'zustand'
 import { listDirectory, readFile, getFileInfo } from '@/api/files'
 import type { FileContent, FileInfo } from '@/types'
 
+/** MIME types that indicate text content (even though some start with application/) */
+const TEXT_MIME_PREFIXES = ['text/', 'application/json', 'application/xml', 'application/javascript']
+
+function isBinaryMime(mime: string): boolean {
+  return !TEXT_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))
+}
+
 export interface TreeNode {
   id: string
   name: string
@@ -160,33 +167,34 @@ export const useExplorerStore = create<ExplorerState & ExplorerActions>(
         contentLoading: true,
         infoLoading: true,
       })
-      // Fetch content and info concurrently
-      const contentPromise = readFile(projectId, node.id)
-        .then((content) => {
-          // Only update if still the selected file
-          if (get().selectedPath === node.id) {
-            set({ fileContent: content, contentLoading: false })
-          }
-        })
-        .catch(() => {
-          if (get().selectedPath === node.id) {
-            set({ contentLoading: false })
-          }
-        })
 
-      const infoPromise = getFileInfo(projectId, node.id)
-        .then((info) => {
-          if (get().selectedPath === node.id) {
-            set({ fileInfo: info, infoLoading: false })
-          }
-        })
-        .catch(() => {
-          if (get().selectedPath === node.id) {
-            set({ infoLoading: false })
-          }
-        })
+      // Fetch file info first to determine if binary
+      try {
+        const info = await getFileInfo(projectId, node.id)
+        if (get().selectedPath !== node.id) return
+        set({ fileInfo: info, infoLoading: false })
 
-      await Promise.all([contentPromise, infoPromise])
+        // If binary, skip content fetch — HexViewer manages its own data
+        if (isBinaryMime(info.mime_type)) {
+          set({ contentLoading: false })
+          return
+        }
+      } catch {
+        if (get().selectedPath !== node.id) return
+        set({ infoLoading: false })
+      }
+
+      // Fetch text content
+      try {
+        const content = await readFile(projectId, node.id)
+        if (get().selectedPath === node.id) {
+          set({ fileContent: content, contentLoading: false })
+        }
+      } catch {
+        if (get().selectedPath === node.id) {
+          set({ contentLoading: false })
+        }
+      }
     },
 
     reset: () => set(initialState),

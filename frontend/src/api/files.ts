@@ -17,10 +17,11 @@ export async function readFile(
   path: string,
   offset?: number,
   length?: number,
+  format?: string,
 ): Promise<FileContent> {
   const { data } = await apiClient.get<FileContent>(
     `/projects/${projectId}/files/read`,
-    { params: { path, offset, length } },
+    { params: { path, offset, length, format } },
   )
   return data
 }

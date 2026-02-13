@@ -106,6 +106,8 @@ const extensionLanguageMap: Record<string, string> = {
   cfg: 'ini',
   sql: 'sql',
   md: 'markdown',
+  asm: 'assembly',
+  s: 'assembly',
   mk: 'makefile',
   makefile: 'makefile',
   dockerfile: 'dockerfile',
