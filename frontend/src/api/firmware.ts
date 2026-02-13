@@ -26,8 +26,8 @@ export async function uploadFirmware(
 
 export async function getFirmware(
   projectId: string,
-): Promise<FirmwareDetail[]> {
-  const { data } = await apiClient.get<FirmwareDetail[]>(
+): Promise<FirmwareDetail> {
+  const { data } = await apiClient.get<FirmwareDetail>(
     `/projects/${projectId}/firmware`,
   )
   return data
@@ -38,6 +38,8 @@ export async function unpackFirmware(
 ): Promise<FirmwareDetail> {
   const { data } = await apiClient.post<FirmwareDetail>(
     `/projects/${projectId}/firmware/unpack`,
+    null,
+    { timeout: 120_000 },
   )
   return data
 }
