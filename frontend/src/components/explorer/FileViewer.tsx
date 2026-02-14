@@ -8,7 +8,7 @@ import { getMonacoLanguage } from '@/utils/fileIcons'
 import { registerAssemblyLanguage } from '@/utils/monacoAssembly'
 import { registerShellLanguage } from '@/utils/monacoShell'
 import { formatFileSize } from '@/utils/format'
-import { listFunctions, disassembleFunction } from '@/api/analysis'
+import { listFunctions, disassembleFunction, decompileFunction } from '@/api/analysis'
 import type { FunctionInfo } from '@/types'
 import HexViewer from './HexViewer'
 import BinaryInfo from './BinaryInfo'
@@ -101,6 +101,9 @@ function BinaryTabs({
   const [selectedFunction, setSelectedFunction] = useState<string | null>(null)
   const [disasm, setDisasm] = useState<string | null>(null)
   const [disasmLoading, setDisasmLoading] = useState(false)
+  const [decompilation, setDecompilation] = useState<string | null>(null)
+  const [decompilationLoading, setDecompilationLoading] = useState(false)
+  const [decompilationFunction, setDecompilationFunction] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState('content')
 
   // Reset state when file changes
@@ -109,10 +112,12 @@ function BinaryTabs({
     setFunctionsLoaded(false)
     setSelectedFunction(null)
     setDisasm(null)
+    setDecompilation(null)
+    setDecompilationFunction(null)
     setActiveTab('content')
   }, [filePath])
 
-  // Load functions when Functions tab is first selected
+  // Load functions when Functions tab is first selected; load decompilation when Decompile tab selected
   const handleTabChange = useCallback(
     (tab: string) => {
       setActiveTab(tab)
@@ -126,8 +131,17 @@ function BinaryTabs({
           .catch(() => setFunctions([]))
           .finally(() => setFunctionsLoading(false))
       }
+      if (tab === 'decompile' && selectedFunction && decompilationFunction !== selectedFunction) {
+        setDecompilation(null)
+        setDecompilationFunction(selectedFunction)
+        setDecompilationLoading(true)
+        decompileFunction(projectId, filePath, selectedFunction)
+          .then((resp) => setDecompilation(resp.decompiled_code))
+          .catch(() => setDecompilation('Decompilation failed.'))
+          .finally(() => setDecompilationLoading(false))
+      }
     },
-    [projectId, filePath, functionsLoaded, functionsLoading, isElf],
+    [projectId, filePath, functionsLoaded, functionsLoading, isElf, selectedFunction, decompilationFunction],
   )
 
   // Load disassembly when a function is selected
@@ -151,6 +165,7 @@ function BinaryTabs({
         <TabsTrigger value="content">Hex</TabsTrigger>
         {isElf && <TabsTrigger value="functions">Functions</TabsTrigger>}
         {isElf && selectedFunction && <TabsTrigger value="disasm">Disassembly</TabsTrigger>}
+        {isElf && selectedFunction && <TabsTrigger value="decompile">Decompile</TabsTrigger>}
         <TabsTrigger value="info">Info</TabsTrigger>
       </TabsList>
 
@@ -182,6 +197,16 @@ function BinaryTabs({
             functionName={selectedFunction}
             disassembly={disasm}
             loading={disasmLoading}
+          />
+        </TabsContent>
+      )}
+
+      {isElf && selectedFunction && (
+        <TabsContent value="decompile" className="flex-1 overflow-hidden mt-0 p-0">
+          <DecompilationPanel
+            functionName={selectedFunction}
+            decompilation={decompilation}
+            loading={decompilationLoading}
           />
         </TabsContent>
       )}
@@ -345,11 +370,67 @@ function DisassemblyPanel({
   )
 }
 
+/* ── Decompilation (pseudo-C) display in Monaco ── */
+
+function DecompilationPanel({
+  functionName,
+  decompilation,
+  loading,
+}: {
+  functionName: string
+  decompilation: string | null
+  loading: boolean
+}) {
+  if (loading) {
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <div className="flex flex-col items-center gap-2 text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          <span className="text-xs">Decompiling {functionName}… (this may take 30–120s on first call)</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (!decompilation) {
+    return (
+      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+        Decompilation unavailable.
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="border-b border-border px-4 py-1.5 text-xs text-muted-foreground">
+        Decompilation of <span className="font-mono text-foreground">{functionName}</span>
+      </div>
+      <div className="flex-1">
+        <Editor
+          language="c"
+          value={decompilation}
+          theme="vs-dark"
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            fontSize: 13,
+            lineNumbers: 'on',
+            wordWrap: 'off',
+            renderLineHighlight: 'none',
+            contextmenu: false,
+            automaticLayout: true,
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
 /* ── Text file tabs: Content, Info ── */
 
 function TextTabs({
   selectedNode,
-  selectedPath,
   fileContent,
   fileInfo,
   infoLoading,

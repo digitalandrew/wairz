@@ -1,4 +1,4 @@
-"""REST endpoints for binary analysis: functions, disassembly, protections."""
+"""REST endpoints for binary analysis: functions, disassembly, decompilation, protections."""
 
 import asyncio
 import uuid
@@ -12,6 +12,7 @@ from app.services.analysis_service import (
     get_session_cache,
 )
 from app.services.firmware_service import FirmwareService
+from app.services.ghidra_service import decompile_function as ghidra_decompile
 from app.utils.sandbox import validate_path
 
 router = APIRouter(
@@ -126,4 +127,33 @@ async def get_binary_info(
         "binary_path": path,
         "info": info,
         "protections": protections,
+    }
+
+
+@router.get("/decompile")
+async def decompile_function(
+    path: str = Query(..., description="Path to ELF binary"),
+    function: str = Query(..., description="Function name to decompile"),
+    firmware=Depends(_resolve_firmware),
+    db: AsyncSession = Depends(get_db),
+):
+    """Decompile a function from an ELF binary using Ghidra headless."""
+    try:
+        full_path = validate_path(firmware.extracted_path, path)
+    except Exception:
+        raise HTTPException(403, "Invalid path")
+
+    try:
+        decompiled = await ghidra_decompile(full_path, function, firmware.id, db)
+    except FileNotFoundError:
+        raise HTTPException(404, f"Binary not found: {path}")
+    except TimeoutError as e:
+        raise HTTPException(504, str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    return {
+        "binary_path": path,
+        "function": function,
+        "decompiled_code": decompiled,
     }

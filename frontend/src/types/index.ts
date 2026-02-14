@@ -86,6 +86,12 @@ export interface DisassemblyResponse {
   disassembly: string
 }
 
+export interface DecompilationResponse {
+  binary_path: string
+  function: string
+  decompiled_code: string
+}
+
 export interface BinaryProtections {
   nx: boolean
   relro: string

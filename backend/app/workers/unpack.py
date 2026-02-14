@@ -45,7 +45,7 @@ async def run_binwalk_extraction(firmware_path: str, output_dir: str, timeout: i
         await proc.wait()
         raise TimeoutError(f"binwalk extraction timed out after {timeout}s")
 
-    return stdout.decode(errors="replace")
+    return stdout.decode(errors="replace").replace("\x00", "")
 
 
 def find_filesystem_root(extraction_dir: str) -> str | None:
@@ -118,7 +118,10 @@ def detect_os_info(fs_root: str) -> str | None:
             try:
                 with open(full_path) as f:
                     content = f.read(1024)
-                return content.strip()
+                # Strip null bytes — firmware may have zeroed-out placeholder files
+                content = content.replace("\x00", "").strip()
+                if content:
+                    return content
             except Exception:
                 continue
     return None

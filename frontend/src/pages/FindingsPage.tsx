@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom'
 import { ShieldAlert, Loader2 } from 'lucide-react'
 import { listFindings, updateFinding, deleteFinding } from '@/api/findings'
 import { useChatStore } from '@/stores/chatStore'
-import type { Finding, Severity, FindingStatus } from '@/types'
+import type { Finding, FindingUpdate, Severity, FindingStatus } from '@/types'
 import FindingsList from '@/components/findings/FindingsList'
 import FindingDetail from '@/components/findings/FindingDetail'
 import ReportExport from '@/components/findings/ReportExport'
@@ -48,7 +48,7 @@ export default function FindingsPage() {
   }, [])
 
   const handleUpdate = useCallback(
-    async (findingId: string, updates: Partial<Finding>) => {
+    async (findingId: string, updates: FindingUpdate) => {
       if (!projectId) return
       const updated = await updateFinding(projectId, findingId, updates)
       setFindings((prev) =>

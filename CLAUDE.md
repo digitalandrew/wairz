@@ -136,6 +136,11 @@ wairz/
 │   │   │   │   ├── ChatMessage.tsx
 │   │   │   │   ├── ToolCallBlock.tsx
 │   │   │   │   └── ChatInput.tsx
+│   │   │   ├── component-map/
+│   │   │   │   ├── ComponentMap.tsx     # Main graph canvas (ReactFlow)
+│   │   │   │   ├── ComponentNode.tsx    # Custom node renderer
+│   │   │   │   ├── EdgeDetails.tsx      # Edge tooltip/popover (imported functions, etc.)
+│   │   │   │   └── MapControls.tsx      # Filter, search, layout controls
 │   │   │   └── findings/
 │   │   │       ├── FindingsList.tsx
 │   │   │       ├── FindingDetail.tsx
@@ -147,7 +152,8 @@ wairz/
 │   │   ├── stores/              # Zustand stores
 │   │   │   ├── projectStore.ts
 │   │   │   ├── chatStore.ts
-│   │   │   └── explorerStore.ts
+│   │   │   ├── explorerStore.ts
+│   │   │   └── componentMapStore.ts
 │   │   ├── types/
 │   │   │   └── index.ts
 │   │   └── utils/
@@ -183,12 +189,14 @@ wairz/
 │   │   │   ├── files.py
 │   │   │   ├── analysis.py
 │   │   │   ├── chat.py          # WebSocket endpoint
+│   │   │   ├── component_map.py # Component graph endpoint
 │   │   │   └── findings.py
 │   │   ├── services/            # Business logic
 │   │   │   ├── __init__.py
 │   │   │   ├── firmware_service.py
 │   │   │   ├── file_service.py
 │   │   │   ├── analysis_service.py
+│   │   │   ├── component_map_service.py # Graph builder: dependency analysis
 │   │   │   └── finding_service.py
 │   │   ├── ai/                  # AI orchestration
 │   │   │   ├── __init__.py
@@ -432,6 +440,9 @@ GET    /api/v1/projects/{id}/analysis/strings?path=  # Extract strings
 GET    /api/v1/projects/{id}/analysis/binary-info?path=  # ELF info
 GET    /api/v1/projects/{id}/analysis/functions?path=  # List functions
 GET    /api/v1/projects/{id}/analysis/disasm?path=&function=  # Disassemble
+
+# Component Map
+GET    /api/v1/projects/{id}/component-map  # Build & return component dependency graph
 
 # Findings
 GET    /api/v1/projects/{id}/findings      # List findings
@@ -970,9 +981,171 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
 ---
 
-### Phase 6: Polish & Release (Sessions 23–26)
+### Phase 6: Firmware Component Map (Sessions 23–25)
 
-#### Session 6.1: Background Tasks & Status
+**Goal:** Interactive graph visualization showing firmware components (binaries, libraries, scripts, config files) as nodes with relationship edges (library imports, script calls, service dependencies), enabling users to visually understand firmware architecture at a glance.
+
+#### Session 6.1: Component Graph Backend — Dependency Analysis Engine
+
+**Do:**
+- Create `app/services/component_map_service.py` — builds a dependency graph from the unpacked firmware:
+  - **ELF binary → shared library links:** Parse `DT_NEEDED` entries from the ELF dynamic section (via `pyelftools`) to find which `.so` libraries each binary links against. Resolve library paths using `DT_RPATH`/`DT_RUNPATH` and common search paths (`/lib`, `/usr/lib`, etc.)
+  - **Binary → imported functions per library:** Parse the `.dynsym` and `.dynstr` sections to extract imported symbol names. Group by source library using version info and GOT/PLT entries. This powers the edge detail view showing which functions are imported from a given library
+  - **Shell script → script/binary calls:** Parse shell scripts (files with `#!/bin/sh`, `#!/bin/bash`, etc. shebang or `.sh` extension) for:
+    - `source`/`.` commands (script sourcing)
+    - Direct binary invocations (e.g., `iptables`, `httpd`, `/usr/sbin/dropbear`)
+    - Backtick/`$()` command substitution calls
+  - **Init script → service mapping:** Parse `/etc/init.d/*`, `/etc/inittab`, and systemd units to determine which scripts start which binaries/services
+  - **Config file → binary references:** Scan config files for paths to binaries or libraries they configure (e.g., `lighttpd.conf` referencing `/usr/lib/mod_*.so`)
+- Define the graph data model:
+  ```python
+  @dataclass
+  class ComponentNode:
+      id: str              # filesystem path (unique)
+      label: str           # filename
+      type: str            # "binary", "library", "script", "config", "init_script"
+      path: str            # full path in extracted FS
+      size: int
+      metadata: dict       # type-specific: architecture, protections, shebang, etc.
+
+  @dataclass
+  class ComponentEdge:
+      source: str          # source node id
+      target: str          # target node id
+      type: str            # "links_library", "imports_functions", "sources_script",
+                           # "executes", "starts_service", "configures"
+      details: dict        # type-specific: {"functions": ["printf", "malloc", ...]}
+
+  @dataclass
+  class ComponentGraph:
+      nodes: list[ComponentNode]
+      edges: list[ComponentEdge]
+  ```
+- Create Pydantic response schemas in `app/schemas/component_map.py`
+- Create `app/routers/component_map.py`:
+  - `GET /api/v1/projects/{id}/component-map` — builds (or returns cached) graph
+  - Should cache the result (graph building walks the entire filesystem and parses many ELF files — can take 10-30s)
+  - Use `analysis_cache` table with operation `component_map` to cache per firmware
+- Path validation: all paths must be validated against extracted root (reuse `validate_path` utility)
+- Limit graph size: cap at 500 nodes. If firmware has more components, prioritize:
+  1. ELF binaries and libraries
+  2. Init scripts and startup scripts
+  3. Config files referenced by services
+  4. Other shell scripts
+- Register router in `app/main.py`
+
+**Definition of Done:**
+- API endpoint returns a complete component graph for an unpacked firmware
+- ELF binaries correctly show which libraries they link and which functions they import
+- Shell scripts show call relationships to other scripts and binaries
+- Init scripts show service startup relationships
+- Graph is cached — second request is instant
+- Result is < 1MB for typical firmware images
+
+#### Session 6.2: Frontend — Interactive Graph Visualization
+
+**Do:**
+- Install `@xyflow/react` (ReactFlow v12) for the graph canvas
+- Add route: `/projects/:id/map` accessible from the project sidebar/navigation
+- Create `frontend/src/pages/ComponentMapPage.tsx`:
+  - Fetches graph data from `/api/v1/projects/{id}/component-map`
+  - Loading state while graph is being built (can take 10-30s on first load)
+  - Error state if no firmware is unpacked
+- Create `frontend/src/components/component-map/ComponentMap.tsx`:
+  - ReactFlow canvas with pan, zoom, minimap
+  - Automatic layout using `dagre` or `elkjs` (hierarchical left-to-right or top-to-bottom)
+  - Nodes colored/shaped by type:
+    - **Binary (executable):** Blue rounded rectangle with CPU icon
+    - **Library (.so):** Purple rounded rectangle with package icon
+    - **Shell script:** Green rounded rectangle with terminal icon
+    - **Config file:** Orange rounded rectangle with settings icon
+    - **Init script:** Yellow rounded rectangle with play icon
+  - Edges styled by relationship type:
+    - **links_library:** Solid line
+    - **imports_functions:** Dashed line (detail available on hover)
+    - **executes/sources_script:** Dotted line with arrow
+    - **starts_service:** Bold line with arrow
+    - **configures:** Thin gray line
+- Create `frontend/src/components/component-map/ComponentNode.tsx`:
+  - Custom ReactFlow node with icon, label, and file size badge
+  - Click: navigate to file in the explorer view (`/projects/:id/explore` with the file selected)
+  - Highlight on hover with connected edges
+- Create `frontend/src/components/component-map/EdgeDetails.tsx`:
+  - Hover/click an edge to see relationship details in a popover/tooltip
+  - For library import edges: show list of imported function names (scrollable if many)
+  - For script execution edges: show the command line used
+  - For init script edges: show the service name and runlevel
+- Create `frontend/src/components/component-map/MapControls.tsx`:
+  - Filter by node type (checkboxes: binaries, libraries, scripts, configs)
+  - Search/highlight: type a component name to find and center it
+  - Layout toggle: hierarchical vs force-directed
+  - Zoom-to-fit button
+  - Show/hide edge labels
+- Create `frontend/src/api/componentMap.ts` — API client function
+- Add types to `frontend/src/types/index.ts`:
+  ```typescript
+  interface ComponentNode {
+    id: string
+    label: string
+    type: 'binary' | 'library' | 'script' | 'config' | 'init_script'
+    path: string
+    size: number
+    metadata: Record<string, unknown>
+  }
+
+  interface ComponentEdge {
+    source: string
+    target: string
+    type: 'links_library' | 'imports_functions' | 'sources_script' |
+          'executes' | 'starts_service' | 'configures'
+    details: Record<string, unknown>
+  }
+
+  interface ComponentGraph {
+    nodes: ComponentNode[]
+    edges: ComponentEdge[]
+  }
+  ```
+- Add "Map" navigation item to the project sidebar/layout
+
+**Definition of Done:**
+- Component map page loads and renders the firmware dependency graph
+- Nodes are visually distinct by type with appropriate icons and colors
+- Edges clearly show relationship types
+- Hovering/clicking an edge shows details (e.g., imported function list)
+- Clicking a node navigates to that file in the explorer
+- Can filter by component type and search for specific components
+- Layout is readable for firmware with 50-200 components
+- Pan, zoom, and minimap work smoothly
+
+#### Session 6.3: Component Map Polish & AI Integration
+
+**Do:**
+- Add AI tool `get_component_map` to `app/ai/tools/filesystem.py`:
+  - Returns a text summary of the component graph (node count by type, key binaries, highly-connected components)
+  - Useful for AI to understand firmware architecture before diving into specific files
+- Add "Ask AI about this component" context option:
+  - Right-click a node in the graph → opens chat with the file attached
+  - Right-click an edge → opens chat with a prompt about the relationship (e.g., "What functions does httpd import from libcrypto?")
+- Performance optimization:
+  - Lazy render: only render nodes visible in the viewport (ReactFlow handles this natively)
+  - Progressive loading: show the graph incrementally as nodes are processed
+  - For large graphs (200+ nodes), default to collapsed clusters by directory (e.g., all `/usr/lib/*.so` as one "usr/lib libraries" group that expands on click)
+- Add export options:
+  - Export graph as PNG/SVG image
+  - Export as JSON for external tools
+
+**Definition of Done:**
+- AI can query the component map and use it to understand firmware architecture
+- Right-click context menus on nodes/edges integrate with AI chat
+- Large firmware images render without lag
+- Export to image works
+
+---
+
+### Phase 7: Polish & Release (Sessions 26–29)
+
+#### Session 7.1: Background Tasks & Status
 
 **Do:**
 - Set up `arq` worker with Redis
@@ -980,7 +1153,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Add real-time status updates via WebSocket or polling
 - Add progress indicators for long-running operations (Ghidra analysis, full scan)
 
-#### Session 6.2: Error Handling & Edge Cases
+#### Session 7.2: Error Handling & Edge Cases
 
 **Do:**
 - Handle: corrupt firmware, unsupported formats, very large files, empty filesystems
@@ -989,7 +1162,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Add graceful shutdown handling
 - Comprehensive error messages for users
 
-#### Session 6.3: Documentation & Testing
+#### Session 7.3: Documentation & Testing
 
 **Do:**
 - Write comprehensive `README.md`:
@@ -1003,7 +1176,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
   - Upload → unpack → browse → AI analysis → finding creation
 - Add example firmware images for testing (OpenWrt, DD-WRT, etc.)
 
-#### Session 6.4: Final Integration & Release
+#### Session 7.4: Final Integration & Release
 
 **Do:**
 - End-to-end testing of full workflow

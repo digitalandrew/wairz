@@ -16,7 +16,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import type { Finding, FindingStatus, Severity } from '@/types'
+import type { Finding, FindingUpdate, FindingStatus, Severity } from '@/types'
 import { formatDate } from '@/utils/format'
 import { getCweDescription, getCweMitreUrl } from '@/utils/cwe'
 
@@ -37,7 +37,7 @@ const STATUS_OPTIONS: { value: FindingStatus; label: string }[] = [
 
 interface FindingDetailProps {
   finding: Finding
-  onUpdate: (findingId: string, updates: Partial<Finding>) => Promise<void>
+  onUpdate: (findingId: string, updates: FindingUpdate) => Promise<void>
   onDelete: (findingId: string) => Promise<void>
 }
 
@@ -57,8 +57,8 @@ export default function FindingDetail({ finding, onUpdate, onDelete }: FindingDe
 
   const handleSaveEdit = async () => {
     await onUpdate(finding.id, {
-      description: editDesc || null,
-      evidence: editEvidence || null,
+      description: editDesc || undefined,
+      evidence: editEvidence || undefined,
     })
     setEditing(false)
   }

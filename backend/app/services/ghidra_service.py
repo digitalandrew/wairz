@@ -94,11 +94,17 @@ async def _run_ghidra_subprocess(
             os.path.basename(binary_path),
         )
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"Ghidra not found at {cmd[0]}. "
+                "Install Ghidra or set GHIDRA_PATH in .env."
+            )
 
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -167,6 +173,27 @@ async def _store_cached_result(
     await db.flush()
 
 
+# Radare2 prefixes to strip when passing function names to Ghidra.
+# Order matters: longer/more-specific prefixes first.
+_R2_PREFIXES = [
+    "sym.imp.",   # imported symbols
+    "sym.go.",    # Go symbols
+    "sym.",       # regular symbols
+    "fcn.",       # auto-named functions
+    "sub.",       # sub-routine names
+    "loc.",       # locations
+    "main.",      # main prefix in some binaries
+]
+
+
+def _strip_r2_prefix(name: str) -> str:
+    """Strip radare2 naming prefixes from a function name."""
+    for prefix in _R2_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
 async def decompile_function(
     binary_path: str,
     function_name: str,
@@ -191,6 +218,9 @@ async def decompile_function(
     """
     if not os.path.isfile(binary_path):
         raise FileNotFoundError(f"Binary not found: {binary_path}")
+
+    # Strip radare2 naming prefixes — Ghidra uses raw symbol names
+    function_name = _strip_r2_prefix(function_name)
 
     # Compute hash for cache key
     binary_sha256 = await asyncio.get_event_loop().run_in_executor(

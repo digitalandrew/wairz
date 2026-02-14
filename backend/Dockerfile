@@ -10,26 +10,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     p7zip-full \
     file \
     libmagic1 \
-    radare2 \
     build-essential \
     git \
     zlib1g-dev \
     liblzma-dev \
     liblzo2-dev \
     wget \
+    curl \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install sasquatch for non-standard SquashFS
+# Install radare2 from GitHub releases (not in Debian Trixie repos)
+RUN curl -fsSL https://github.com/radareorg/radare2/releases/download/5.9.8/radare2_5.9.8_amd64.deb -o /tmp/radare2.deb \
+    && dpkg -i /tmp/radare2.deb || apt-get install -f -y \
+    && rm /tmp/radare2.deb
+
+# Install sasquatch for non-standard SquashFS (ignore build errors — best-effort)
 RUN git clone https://github.com/devttys0/sasquatch.git /tmp/sasquatch \
     && cd /tmp/sasquatch \
-    && ./build.sh \
-    || true \
+    && sed -i 's/-Werror//g' squashfs-tools/Makefile patches/*.patch 2>/dev/null; \
+    ./build.sh || true \
     && rm -rf /tmp/sasquatch
 
-# Install OpenJDK 17 for Ghidra
+# Install OpenJDK 21 for Ghidra (JDK 17 not available in Trixie)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-17-jdk-headless \
+    openjdk-21-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ghidra

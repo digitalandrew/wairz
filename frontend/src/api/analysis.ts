@@ -2,6 +2,7 @@ import apiClient from './client'
 import type {
   FunctionListResponse,
   DisassemblyResponse,
+  DecompilationResponse,
   BinaryInfoResponse,
 } from '@/types'
 
@@ -25,6 +26,18 @@ export async function disassembleFunction(
   const { data } = await apiClient.get<DisassemblyResponse>(
     `/projects/${projectId}/analysis/disasm`,
     { params: { path: binaryPath, function: functionName, max_instructions: maxInstructions } },
+  )
+  return data
+}
+
+export async function decompileFunction(
+  projectId: string,
+  binaryPath: string,
+  functionName: string,
+): Promise<DecompilationResponse> {
+  const { data } = await apiClient.get<DecompilationResponse>(
+    `/projects/${projectId}/analysis/decompile`,
+    { params: { path: binaryPath, function: functionName } },
   )
   return data
 }

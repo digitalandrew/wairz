@@ -7,7 +7,6 @@ import {
   ShieldX,
   ChevronDown,
   ChevronUp,
-  ArrowUpDown,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
