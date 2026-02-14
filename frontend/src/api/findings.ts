@@ -54,7 +54,7 @@ export async function deleteFinding(
 
 export async function exportFindings(
   projectId: string,
-  format: 'markdown' = 'markdown',
+  format: 'markdown' | 'pdf' = 'markdown',
 ): Promise<Blob> {
   const { data } = await apiClient.post(
     `/projects/${projectId}/findings/export`,

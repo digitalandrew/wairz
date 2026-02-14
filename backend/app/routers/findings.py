@@ -10,7 +10,7 @@ from app.models.firmware import Firmware
 from app.models.project import Project
 from app.schemas.finding import FindingCreate, FindingResponse, FindingUpdate
 from app.services.finding_service import FindingService
-from app.services.report_service import generate_markdown_report
+from app.services.report_service import generate_markdown_report, generate_pdf_report
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/findings",
@@ -98,7 +98,7 @@ async def delete_finding(
 @router.post("/export")
 async def export_findings(
     project_id: uuid.UUID,
-    format: str = Query("markdown", pattern="^(markdown)$"),
+    format: str = Query("markdown", pattern="^(markdown|pdf)$"),
     db: AsyncSession = Depends(get_db),
 ):
     project = await _get_project_or_404(project_id, db)
@@ -113,9 +113,19 @@ async def export_findings(
     svc = FindingService(db)
     findings = await svc.list_by_project(project_id)
 
-    md = generate_markdown_report(project, firmware, findings)
-    filename = f"{project.name.replace(' ', '_')}_security_report.md"
+    safe_name = project.name.replace(" ", "_")
 
+    if format == "pdf":
+        pdf_bytes = generate_pdf_report(project, firmware, findings)
+        filename = f"{safe_name}_security_report.pdf"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    md = generate_markdown_report(project, firmware, findings)
+    filename = f"{safe_name}_security_report.md"
     return Response(
         content=md,
         media_type="text/markdown",

@@ -18,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     unzip \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install radare2 from GitHub releases (not in Debian Trixie repos)

@@ -16,6 +16,7 @@ dependencies = [
     "aiofiles>=24.0.0",
     "anthropic>=0.79.0",
     "r2pipe>=0.19.0",
+    "weasyprint>=62.0",
 ]
 
 [tool.pytest.ini_options]
