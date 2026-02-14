@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     p7zip-full \
     file \
     libmagic1 \
+    radare2 \
     build-essential \
     git \
     zlib1g-dev \
