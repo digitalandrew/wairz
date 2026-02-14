@@ -67,6 +67,41 @@ export interface SearchResult {
   truncated: boolean
 }
 
+// ── Analysis types ──
+
+export interface FunctionInfo {
+  name: string
+  offset: number
+  size: number
+}
+
+export interface FunctionListResponse {
+  binary_path: string
+  functions: FunctionInfo[]
+}
+
+export interface DisassemblyResponse {
+  binary_path: string
+  function: string
+  disassembly: string
+}
+
+export interface BinaryProtections {
+  nx: boolean
+  relro: string
+  canary: boolean
+  pie: boolean
+  fortify: boolean
+  stripped: boolean
+  error?: string
+}
+
+export interface BinaryInfoResponse {
+  binary_path: string
+  info: Record<string, unknown>
+  protections: BinaryProtections
+}
+
 // ── Chat types ──
 
 export interface ChatAttachment {

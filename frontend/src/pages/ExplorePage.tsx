@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { FolderTree } from 'lucide-react'
 import { useExplorerStore } from '@/stores/explorerStore'
 import { useChatStore } from '@/stores/chatStore'
@@ -18,6 +18,10 @@ export default function ExplorePage() {
     }
   }, [resetExplorer, resetChat])
 
+  const handleRequestChat = useCallback(() => {
+    setChatOpen(true)
+  }, [])
+
   return (
     <div className="-m-6 flex h-[calc(100vh-3.5rem)]">
       {/* Left panel: file tree */}
@@ -26,7 +30,7 @@ export default function ExplorePage() {
           <FolderTree className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-medium">Files</span>
         </div>
-        <FileTree />
+        <FileTree onRequestChat={handleRequestChat} />
       </div>
 
       {/* Center panel: file viewer */}
