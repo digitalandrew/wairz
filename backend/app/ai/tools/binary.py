@@ -1,10 +1,11 @@
-"""Binary analysis AI tools using radare2 and pyelftools."""
+"""Binary analysis AI tools using radare2, pyelftools, and Ghidra."""
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.services.analysis_service import (
     check_binary_protections,
     get_session_cache,
 )
+from app.services.ghidra_service import decompile_function
 from app.utils.sandbox import validate_path
 
 
@@ -214,6 +215,28 @@ async def _handle_check_binary_protections(
     return "\n".join(lines)
 
 
+async def _handle_decompile_function(input: dict, context: ToolContext) -> str:
+    """Decompile a function using Ghidra headless, returning pseudo-C output."""
+    path = validate_path(context.extracted_path, input["binary_path"])
+    function_name = input["function_name"]
+
+    try:
+        result = await decompile_function(
+            binary_path=path,
+            function_name=function_name,
+            firmware_id=context.firmware_id,
+            db=context.db,
+        )
+    except FileNotFoundError:
+        return f"Error: Binary not found at '{input['binary_path']}'."
+    except TimeoutError as exc:
+        return f"Error: {exc}"
+    except RuntimeError as exc:
+        return f"Error: {exc}"
+
+    return f"Decompiled output for {function_name}:\n\n{result}"
+
+
 def register_binary_tools(registry: ToolRegistry) -> None:
     """Register all binary analysis tools with the given registry."""
 
@@ -264,6 +287,34 @@ def register_binary_tools(registry: ToolRegistry) -> None:
             "required": ["binary_path", "function_name"],
         },
         handler=_handle_disassemble_function,
+    )
+
+    registry.register(
+        name="decompile_function",
+        description=(
+            "Decompile a function from an ELF binary into pseudo-C code using "
+            "Ghidra. This produces high-level C-like output that is much easier "
+            "to read than assembly. Use list_functions first to find function "
+            "names. Results are cached — first call for a binary may take 30-120s, "
+            "subsequent calls for the same binary are instant. Best for "
+            "understanding complex logic, finding vulnerabilities in source-like "
+            "form, and analyzing authentication/crypto routines."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the ELF binary in the firmware filesystem",
+                },
+                "function_name": {
+                    "type": "string",
+                    "description": "Function name to decompile (e.g. 'main', 'auth_check'). Use list_functions to find available names.",
+                },
+            },
+            "required": ["binary_path", "function_name"],
+        },
+        handler=_handle_decompile_function,
     )
 
     registry.register(

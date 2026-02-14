@@ -34,14 +34,16 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - path: .env
-        required: false
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://wairz:wairz@postgres:5432/wairz
       REDIS_URL: redis://redis:6379/0
       STORAGE_ROOT: /data/firmware
+      GHIDRA_INSTALL_DIR: /opt/ghidra
+      GHIDRA_SCRIPTS_PATH: /opt/ghidra_scripts
     volumes:
       - firmware_data:/data/firmware
+      - ./ghidra/scripts:/opt/ghidra_scripts:ro
     depends_on:
       postgres:
         condition: service_healthy
