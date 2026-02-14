@@ -150,6 +150,7 @@ export interface Finding {
   file_path: string | null
   line_number: number | null
   cve_ids: string[] | null
+  cwe_ids: string[] | null
   status: FindingStatus
   created_at: string
   updated_at: string
@@ -163,6 +164,7 @@ export interface FindingCreate {
   file_path?: string
   line_number?: number
   cve_ids?: string[]
+  cwe_ids?: string[]
   conversation_id?: string
 }
 
@@ -174,6 +176,7 @@ export interface FindingUpdate {
   file_path?: string
   line_number?: number
   cve_ids?: string[]
+  cwe_ids?: string[]
   status?: FindingStatus
 }
 

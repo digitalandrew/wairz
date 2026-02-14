@@ -15,8 +15,10 @@ import {
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import type { Finding, FindingStatus, Severity } from '@/types'
 import { formatDate } from '@/utils/format'
+import { getCweDescription, getCweMitreUrl } from '@/utils/cwe'
 
 const SEVERITY_CONFIG: Record<Severity, { icon: React.ElementType; className: string; label: string }> = {
   critical: { icon: ShieldX, className: 'bg-red-600 text-white', label: 'Critical' },
@@ -150,6 +152,40 @@ export default function FindingDetail({ finding, onUpdate, onDelete }: FindingDe
               {cve}
             </Badge>
           ))}
+        </div>
+      )}
+
+      {/* CWEs */}
+      {finding.cwe_ids && finding.cwe_ids.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-sm text-muted-foreground">CWEs:</span>
+          <TooltipProvider>
+            {finding.cwe_ids.map((cwe) => {
+              const desc = getCweDescription(cwe)
+              const url = getCweMitreUrl(cwe)
+              return (
+                <Tooltip key={cwe}>
+                  <TooltipTrigger asChild>
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="cursor-pointer"
+                    >
+                      <Badge variant="outline" className="font-mono text-xs hover:bg-accent">
+                        {cwe}
+                        <ExternalLink className="ml-1 inline h-2.5 w-2.5" />
+                      </Badge>
+                    </a>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-72 text-left">
+                    <p className="font-semibold">{cwe}</p>
+                    <p className="mt-0.5">{desc ?? 'View details on MITRE'}</p>
+                  </TooltipContent>
+                </Tooltip>
+              )
+            })}
+          </TooltipProvider>
         </div>
       )}
 

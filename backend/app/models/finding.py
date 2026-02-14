@@ -31,6 +31,7 @@ class Finding(Base):
     file_path: Mapped[str | None] = mapped_column(String(512))
     line_number: Mapped[int | None] = mapped_column(Integer)
     cve_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String))
+    cwe_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     status: Mapped[str] = mapped_column(String(20), default="open", server_default="open")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())

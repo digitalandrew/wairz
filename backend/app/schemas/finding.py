@@ -28,6 +28,7 @@ class FindingCreate(BaseModel):
     file_path: str | None = None
     line_number: int | None = None
     cve_ids: list[str] | None = None
+    cwe_ids: list[str] | None = None
     conversation_id: uuid.UUID | None = None
 
 
@@ -39,6 +40,7 @@ class FindingUpdate(BaseModel):
     file_path: str | None = None
     line_number: int | None = None
     cve_ids: list[str] | None = None
+    cwe_ids: list[str] | None = None
     status: FindingStatus | None = None
 
 
@@ -55,6 +57,7 @@ class FindingResponse(BaseModel):
     file_path: str | None
     line_number: int | None
     cve_ids: list[str] | None
+    cwe_ids: list[str] | None
     status: str
     created_at: datetime
     updated_at: datetime

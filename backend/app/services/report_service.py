@@ -97,6 +97,8 @@ def generate_markdown_report(
                 sections.append(f"**File:** `{f.file_path}{line_info}`  ")
             if f.cve_ids:
                 sections.append(f"**CVEs:** {', '.join(f.cve_ids)}  ")
+            if f.cwe_ids:
+                sections.append(f"**CWEs:** {', '.join(f.cwe_ids)}  ")
             sections.append("")
 
             if f.description:
