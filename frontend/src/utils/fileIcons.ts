@@ -113,12 +113,33 @@ const extensionLanguageMap: Record<string, string> = {
   dockerfile: 'dockerfile',
 }
 
-export function getMonacoLanguage(name: string): string {
+const shebangs: [RegExp, string][] = [
+  [/^#!.*\b(bash|sh|zsh|ash|dash)\b/, 'shell'],
+  [/^#!.*\bpython/, 'python'],
+  [/^#!.*\bperl/, 'perl'],
+  [/^#!.*\bruby/, 'ruby'],
+  [/^#!.*\blua/, 'lua'],
+  [/^#!.*\bnode/, 'javascript'],
+  [/^#!.*\bphp/, 'php'],
+]
+
+export function getMonacoLanguage(name: string, content?: string): string {
   const lower = name.toLowerCase()
   // Handle special filenames
   if (lower === 'makefile' || lower === 'gnumakefile') return 'makefile'
   if (lower === 'dockerfile') return 'dockerfile'
 
   const ext = lower.split('.').pop() ?? ''
-  return extensionLanguageMap[ext] ?? 'plaintext'
+  const fromExt = extensionLanguageMap[ext]
+  if (fromExt) return fromExt
+
+  // Fallback: detect language from shebang line
+  if (content) {
+    const firstLine = content.slice(0, content.indexOf('\n')).trimEnd()
+    for (const [pattern, lang] of shebangs) {
+      if (pattern.test(firstLine)) return lang
+    }
+  }
+
+  return 'plaintext'
 }

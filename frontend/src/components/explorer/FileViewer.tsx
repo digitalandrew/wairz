@@ -5,6 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useExplorerStore } from '@/stores/explorerStore'
 import { getMonacoLanguage } from '@/utils/fileIcons'
 import { registerAssemblyLanguage } from '@/utils/monacoAssembly'
+import { registerShellLanguage } from '@/utils/monacoShell'
 import { formatFileSize } from '@/utils/format'
 import HexViewer from './HexViewer'
 import BinaryInfo from './BinaryInfo'
@@ -93,10 +94,13 @@ export default function FileViewer() {
               )}
               <div className="flex-1">
                 <Editor
-                  language={getMonacoLanguage(selectedNode?.name ?? '')}
+                  language={getMonacoLanguage(selectedNode?.name ?? '', fileContent.content)}
                   value={fileContent.content}
                   theme="vs-dark"
-                  beforeMount={(monaco) => registerAssemblyLanguage(monaco)}
+                  beforeMount={(monaco) => {
+                    registerAssemblyLanguage(monaco)
+                    registerShellLanguage(monaco)
+                  }}
                   options={{
                     readOnly: true,
                     minimap: { enabled: false },
