@@ -69,6 +69,11 @@ export interface SearchResult {
 
 // ── Chat types ──
 
+export interface ChatAttachment {
+  path: string
+  name: string
+}
+
 export interface Conversation {
   id: string
   project_id: string
@@ -84,7 +89,7 @@ export interface ConversationDetail extends Conversation {
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
 
 export type ChatDisplayMessage =
-  | { id: string; kind: 'user'; content: string }
+  | { id: string; kind: 'user'; content: string; attachments?: ChatAttachment[] }
   | { id: string; kind: 'assistant_text'; content: string }
   | { id: string; kind: 'tool_call'; tool: string; toolUseId: string; input: Record<string, unknown> }
   | { id: string; kind: 'tool_result'; tool: string; toolUseId: string; output: string; isError?: boolean }

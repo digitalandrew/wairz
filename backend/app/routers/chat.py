@@ -12,8 +12,12 @@ from app.models.firmware import Firmware
 from app.models.project import Project
 from app.schemas.chat import ConversationCreate, ConversationDetailResponse, ConversationResponse
 from app.services.conversation_service import ConversationService
+from app.services.file_service import FileService
+from app.utils.truncation import truncate_output
 
 logger = logging.getLogger(__name__)
+
+MAX_ATTACHMENTS = 5
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/conversations",
@@ -125,7 +129,37 @@ async def websocket_chat(
                     continue
 
                 user_text = data["content"]
-                messages.append({"role": "user", "content": user_text})
+                attachment_paths = data.get("attachments", [])
+
+                # Build message content — multi-block if attachments present
+                if attachment_paths and isinstance(attachment_paths, list):
+                    file_svc = FileService(firmware.extracted_path)
+                    content_blocks = []
+
+                    for file_path in attachment_paths[:MAX_ATTACHMENTS]:
+                        if not isinstance(file_path, str):
+                            continue
+                        try:
+                            fc = file_svc.read_file(file_path)
+                            file_text = truncate_output(fc.content)
+                            file_type = "binary (hex)" if fc.is_binary else "text"
+                            block = (
+                                f'<attached_file path="{file_path}" type="{file_type}" size="{fc.size}">\n'
+                                f"{file_text}\n"
+                                f"</attached_file>"
+                            )
+                            content_blocks.append({"type": "text", "text": block})
+                        except Exception:
+                            logger.warning("Failed to read attachment: %s", file_path)
+                            content_blocks.append({
+                                "type": "text",
+                                "text": f'<attached_file path="{file_path}" error="Could not read file" />',
+                            })
+
+                    content_blocks.append({"type": "text", "text": user_text})
+                    messages.append({"role": "user", "content": content_blocks})
+                else:
+                    messages.append({"role": "user", "content": user_text})
 
                 async def on_event(event: dict) -> None:
                     await websocket.send_json(event)

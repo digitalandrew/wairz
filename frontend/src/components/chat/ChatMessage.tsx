@@ -1,4 +1,4 @@
-import { User, Bot, AlertCircle } from 'lucide-react'
+import { User, Bot, AlertCircle, FileText } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ChatDisplayMessage } from '@/types'
@@ -14,7 +14,23 @@ export default function ChatMessage({ message }: Props) {
         <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
           <User className="h-3.5 w-3.5 text-primary" />
         </div>
-        <div className="min-w-0 pt-0.5 text-sm whitespace-pre-wrap">{message.content}</div>
+        <div className="min-w-0 pt-0.5">
+          <div className="text-sm whitespace-pre-wrap">{message.content}</div>
+          {message.attachments && message.attachments.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {message.attachments.map((att) => (
+                <span
+                  key={att.path}
+                  className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                  title={att.path}
+                >
+                  <FileText className="h-3 w-3" />
+                  {att.name}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     )
   }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { buildWebSocketURL } from '@/api/chat'
 import { useChatStore } from '@/stores/chatStore'
-import type { WSEvent } from '@/types'
+import type { ChatAttachment, WSEvent } from '@/types'
 
 export function useWebSocket(projectId: string, conversationId: string | null) {
   const wsRef = useRef<WebSocket | null>(null)
@@ -90,11 +90,15 @@ export function useWebSocket(projectId: string, conversationId: string | null) {
   }, [connect])
 
   const sendMessage = useCallback(
-    (content: string) => {
+    (content: string, attachments?: ChatAttachment[]) => {
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
       useChatStore.getState().startStreaming()
-      ws.send(JSON.stringify({ type: 'user_message', content }))
+      const payload: Record<string, unknown> = { type: 'user_message', content }
+      if (attachments?.length) {
+        payload.attachments = attachments.map((a) => a.path)
+      }
+      ws.send(JSON.stringify(payload))
     },
     [],
   )

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { MessageSquare, X, Send, Loader2 } from 'lucide-react'
+import { MessageSquare, X, Send, Loader2, Paperclip, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useChatStore } from '@/stores/chatStore'
+import { useExplorerStore } from '@/stores/explorerStore'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { createConversation } from '@/api/chat'
 import ChatMessage from './ChatMessage'
@@ -15,13 +16,20 @@ interface ChatPanelProps {
 }
 
 export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
-  const { id: projectId } = useParams<{ id: string }>()
+  const { projectId } = useParams<{ projectId: string }>()
   const conversationId = useChatStore((s) => s.conversationId)
   const messages = useChatStore((s) => s.messages)
   const connectionStatus = useChatStore((s) => s.connectionStatus)
   const isStreaming = useChatStore((s) => s.isStreaming)
   const currentTextAccumulator = useChatStore((s) => s.currentTextAccumulator)
   const setConversationId = useChatStore((s) => s.setConversationId)
+  const attachments = useChatStore((s) => s.attachments)
+  const addAttachment = useChatStore((s) => s.addAttachment)
+  const removeAttachment = useChatStore((s) => s.removeAttachment)
+  const clearAttachments = useChatStore((s) => s.clearAttachments)
+
+  const selectedPath = useExplorerStore((s) => s.selectedPath)
+  const selectedNode = useExplorerStore((s) => s.selectedNode)
 
   const { sendMessage } = useWebSocket(projectId!, conversationId)
 
@@ -55,14 +63,24 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     autoScrollRef.current = nearBottom
   }, [])
 
+  const handleAttach = useCallback(() => {
+    if (!selectedPath || !selectedNode || selectedNode.fileType !== 'file') return
+    addAttachment({ path: selectedPath, name: selectedNode.name })
+  }, [selectedPath, selectedNode, addAttachment])
+
   const handleSend = useCallback(() => {
     const text = input.trim()
     if (!text || isStreaming || connectionStatus !== 'connected') return
-    useChatStore.getState().addUserMessage(text)
-    sendMessage(text)
+    const currentAttachments = useChatStore.getState().attachments
+    useChatStore.getState().addUserMessage(
+      text,
+      currentAttachments.length ? currentAttachments : undefined,
+    )
+    sendMessage(text, currentAttachments.length ? currentAttachments : undefined)
+    clearAttachments()
     setInput('')
     autoScrollRef.current = true
-  }, [input, isStreaming, connectionStatus, sendMessage])
+  }, [input, isStreaming, connectionStatus, sendMessage, clearAttachments])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -158,7 +176,49 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
       {/* Input */}
       <div className="border-t border-border p-3">
+        {/* Attachment chips */}
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1">
+            {attachments.map((att) => (
+              <span
+                key={att.path}
+                className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-0.5 text-xs text-primary"
+              >
+                <FileText className="h-3 w-3" />
+                {att.name}
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(att.path)}
+                  className="ml-0.5 rounded hover:bg-primary/20"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="flex gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleAttach}
+            disabled={
+              !selectedPath ||
+              !selectedNode ||
+              selectedNode.fileType !== 'file' ||
+              attachments.length >= 5
+            }
+            title={
+              !selectedPath
+                ? 'Select a file in the explorer first'
+                : attachments.length >= 5
+                  ? 'Max 5 attachments'
+                  : `Attach ${selectedNode?.name ?? 'file'}`
+            }
+            className="shrink-0"
+          >
+            <Paperclip className="h-4 w-4" />
+          </Button>
           <textarea
             ref={textareaRef}
             value={input}
