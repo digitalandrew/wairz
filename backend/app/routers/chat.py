@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import create_tool_registry
-from app.ai.orchestrator import AIOrchestrator, ProjectContext
+from app.ai.orchestrator import ALLOWED_MODELS, DEFAULT_MODEL, AIOrchestrator, ProjectContext
 from app.database import async_session_factory, get_db
 from app.models.firmware import Firmware
 from app.models.project import Project
@@ -129,6 +129,8 @@ async def websocket_chat(
                     continue
 
                 user_text = data["content"]
+                raw_model = data.get("model", DEFAULT_MODEL)
+                model = raw_model if raw_model in ALLOWED_MODELS else DEFAULT_MODEL
                 attachment_paths = data.get("attachments", [])
 
                 # Build message content — multi-block if attachments present
@@ -165,7 +167,7 @@ async def websocket_chat(
                     await websocket.send_json(event)
 
                 messages = await orchestrator.run_conversation(
-                    messages, project_context, db, on_event,
+                    messages, project_context, db, on_event, model=model,
                 )
 
                 await svc.save_messages(conversation_id, messages)

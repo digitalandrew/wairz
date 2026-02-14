@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { ChatAttachment, ChatDisplayMessage, ConnectionStatus } from '@/types'
+import { DEFAULT_MODEL } from '@/types'
 
 let nextId = 0
 function uid(): string {
@@ -18,6 +19,8 @@ interface ChatState {
   currentTextAccumulator: string
   /** The id of the in-progress assistant_text message (null when not streaming text) */
   currentAssistantTextId: string | null
+  /** Selected AI model ID */
+  selectedModel: string
 }
 
 interface ChatActions {
@@ -33,6 +36,7 @@ interface ChatActions {
   addToolCall: (tool: string, toolUseId: string, input: Record<string, unknown>) => void
   addToolResult: (tool: string, toolUseId: string, output: string, isError?: boolean) => void
   addError: (content: string) => void
+  setSelectedModel: (model: string) => void
   startStreaming: () => void
   stopStreaming: () => void
   reset: () => void
@@ -47,6 +51,7 @@ const initialState: ChatState = {
   attachments: [],
   currentTextAccumulator: '',
   currentAssistantTextId: null,
+  selectedModel: DEFAULT_MODEL,
 }
 
 export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
@@ -127,6 +132,8 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
       messages: [...s.messages, { id: uid(), kind: 'error', content }],
       error: content,
     })),
+
+  setSelectedModel: (model) => set({ selectedModel: model }),
 
   startStreaming: () => set({ isStreaming: true, error: null }),
   stopStreaming: () => set({ isStreaming: false }),

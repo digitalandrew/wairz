@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { MessageSquare, X, Send, Loader2, Paperclip, FileText } from 'lucide-react'
+import { MessageSquare, X, Send, Loader2, Paperclip, FileText, ChevronDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useChatStore } from '@/stores/chatStore'
 import { useExplorerStore } from '@/stores/explorerStore'
@@ -9,6 +9,7 @@ import { createConversation } from '@/api/chat'
 import ChatMessage from './ChatMessage'
 import ToolCallBlock from './ToolCallBlock'
 import type { ChatDisplayMessage } from '@/types'
+import { MODEL_OPTIONS } from '@/types'
 
 interface ChatPanelProps {
   isOpen: boolean
@@ -23,6 +24,8 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const isStreaming = useChatStore((s) => s.isStreaming)
   const currentTextAccumulator = useChatStore((s) => s.currentTextAccumulator)
   const setConversationId = useChatStore((s) => s.setConversationId)
+  const selectedModel = useChatStore((s) => s.selectedModel)
+  const setSelectedModel = useChatStore((s) => s.setSelectedModel)
   const attachments = useChatStore((s) => s.attachments)
   const addAttachment = useChatStore((s) => s.addAttachment)
   const removeAttachment = useChatStore((s) => s.removeAttachment)
@@ -35,9 +38,39 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
   const [input, setInput] = useState('')
   const [initializing, setInitializing] = useState(false)
+  const [width, setWidth] = useState(384) // default w-96
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const autoScrollRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const draggingRef = useRef(false)
+
+  // Resize drag handling
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    draggingRef.current = true
+    const startX = e.clientX
+    const startWidth = width
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!draggingRef.current) return
+      const newWidth = Math.min(Math.max(startWidth + (startX - ev.clientX), 280), 800)
+      setWidth(newWidth)
+    }
+
+    const onMouseUp = () => {
+      draggingRef.current = false
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [width])
 
   // Create conversation on first open if needed
   useEffect(() => {
@@ -72,11 +105,12 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     const text = input.trim()
     if (!text || isStreaming || connectionStatus !== 'connected') return
     const currentAttachments = useChatStore.getState().attachments
+    const model = useChatStore.getState().selectedModel
     useChatStore.getState().addUserMessage(
       text,
       currentAttachments.length ? currentAttachments : undefined,
     )
-    sendMessage(text, currentAttachments.length ? currentAttachments : undefined)
+    sendMessage(text, currentAttachments.length ? currentAttachments : undefined, model)
     clearAttachments()
     setInput('')
     autoScrollRef.current = true
@@ -117,7 +151,12 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         : 'bg-gray-400'
 
   return (
-    <div className="flex h-full w-96 shrink-0 flex-col border-l border-border">
+    <div className="relative flex h-full shrink-0 flex-col border-l border-border" style={{ width }}>
+      {/* Resize handle */}
+      <div
+        onMouseDown={handleResizeStart}
+        className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50"
+      />
       {/* Header */}
       <div className="flex items-center gap-2 border-b border-border px-4 py-2">
         <MessageSquare className="h-4 w-4 text-muted-foreground" />
@@ -131,6 +170,62 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         >
           <X className="h-4 w-4" />
         </Button>
+      </div>
+
+      {/* Model selector */}
+      <div className="relative border-b border-border px-3 py-1.5">
+        <button
+          type="button"
+          onClick={() => setModelDropdownOpen((o) => !o)}
+          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <span className="font-medium text-foreground">
+            {MODEL_OPTIONS.find((m) => m.id === selectedModel)?.label ?? 'Sonnet 4'}
+          </span>
+          <span className="text-muted-foreground">
+            {MODEL_OPTIONS.find((m) => m.id === selectedModel)?.cost}
+          </span>
+          <ChevronDown className="ml-auto h-3 w-3" />
+        </button>
+        {modelDropdownOpen && (
+          <>
+            <div
+              className="fixed inset-0 z-20"
+              onClick={() => setModelDropdownOpen(false)}
+            />
+            <div className="absolute left-2 right-2 top-full z-30 mt-1 rounded-md border border-border bg-popover p-1 shadow-md">
+              {MODEL_OPTIONS.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedModel(m.id)
+                    setModelDropdownOpen(false)
+                  }}
+                  className={`flex w-full flex-col gap-0.5 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent ${
+                    m.id === selectedModel ? 'bg-accent/50' : ''
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{m.label}</span>
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-medium leading-none ${
+                        m.cost === 'Least expensive'
+                          ? 'bg-green-500/15 text-green-600 dark:text-green-400'
+                          : m.cost === 'Moderate'
+                            ? 'bg-yellow-500/15 text-yellow-600 dark:text-yellow-400'
+                            : 'bg-red-500/15 text-red-600 dark:text-red-400'
+                      }`}
+                    >
+                      {m.cost}
+                    </span>
+                  </div>
+                  <span className="text-muted-foreground">{m.description}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Messages */}

@@ -102,6 +102,38 @@ export interface BinaryInfoResponse {
   protections: BinaryProtections
 }
 
+// ── Model types ──
+
+export interface ModelOption {
+  id: string
+  label: string
+  cost: 'Least expensive' | 'Moderate' | 'Most expensive'
+  description: string
+}
+
+export const MODEL_OPTIONS: ModelOption[] = [
+  {
+    id: 'claude-haiku-4-5-20251001',
+    label: 'Haiku 4.5',
+    cost: 'Least expensive',
+    description: 'Fast responses, good for quick questions and simple tasks',
+  },
+  {
+    id: 'claude-sonnet-4-20250514',
+    label: 'Sonnet 4',
+    cost: 'Moderate',
+    description: 'Balanced cost and capability, strong tool use and analysis',
+  },
+  {
+    id: 'claude-opus-4-20250918',
+    label: 'Opus 4',
+    cost: 'Most expensive',
+    description: 'Highest capability, best for complex RE and deep analysis',
+  },
+]
+
+export const DEFAULT_MODEL = 'claude-sonnet-4-20250514'
+
 // ── Chat types ──
 
 export interface ChatAttachment {

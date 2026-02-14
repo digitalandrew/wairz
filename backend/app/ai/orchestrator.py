@@ -14,7 +14,12 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+ALLOWED_MODELS = {
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250918",
+}
 MAX_TOKENS = 4096
 
 
@@ -49,6 +54,7 @@ class AIOrchestrator:
         project_context: ProjectContext,
         db: AsyncSession,
         on_event: Callable[[dict], Awaitable[None]],
+        model: str | None = None,
     ) -> list[dict]:
         """Run the AI tool-use loop, streaming events via on_event.
 
@@ -69,6 +75,8 @@ class AIOrchestrator:
             db=db,
         )
 
+        resolved_model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
+
         tools = self._registry.get_anthropic_tools()
         iteration = 0
 
@@ -76,7 +84,7 @@ class AIOrchestrator:
             while iteration < self._max_iterations:
                 # Stream the API response
                 async with self._client.messages.stream(
-                    model=MODEL,
+                    model=resolved_model,
                     max_tokens=MAX_TOKENS,
                     system=system_prompt,
                     messages=messages,

@@ -90,13 +90,16 @@ export function useWebSocket(projectId: string, conversationId: string | null) {
   }, [connect])
 
   const sendMessage = useCallback(
-    (content: string, attachments?: ChatAttachment[]) => {
+    (content: string, attachments?: ChatAttachment[], model?: string) => {
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
       useChatStore.getState().startStreaming()
       const payload: Record<string, unknown> = { type: 'user_message', content }
       if (attachments?.length) {
         payload.attachments = attachments.map((a) => a.path)
+      }
+      if (model) {
+        payload.model = model
       }
       ws.send(JSON.stringify(payload))
     },
