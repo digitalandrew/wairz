@@ -3,6 +3,7 @@ import AppLayout from '@/components/layout/AppLayout'
 import ProjectsPage from '@/pages/ProjectsPage'
 import ProjectDetailPage from '@/pages/ProjectDetailPage'
 import ExplorePage from '@/pages/ExplorePage'
+import FindingsPage from '@/pages/FindingsPage'
 import NotFoundPage from '@/pages/NotFoundPage'
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
           <Route path="/projects/:projectId/explore" element={<ExplorePage />} />
+          <Route path="/projects/:projectId/findings" element={<FindingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

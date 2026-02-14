@@ -134,6 +134,49 @@ export const MODEL_OPTIONS: ModelOption[] = [
 
 export const DEFAULT_MODEL = 'claude-sonnet-4-20250514'
 
+// ── Finding types ──
+
+export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
+export type FindingStatus = 'open' | 'confirmed' | 'false_positive' | 'fixed'
+
+export interface Finding {
+  id: string
+  project_id: string
+  conversation_id: string | null
+  title: string
+  severity: Severity
+  description: string | null
+  evidence: string | null
+  file_path: string | null
+  line_number: number | null
+  cve_ids: string[] | null
+  status: FindingStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface FindingCreate {
+  title: string
+  severity: Severity
+  description?: string
+  evidence?: string
+  file_path?: string
+  line_number?: number
+  cve_ids?: string[]
+  conversation_id?: string
+}
+
+export interface FindingUpdate {
+  title?: string
+  severity?: Severity
+  description?: string
+  evidence?: string
+  file_path?: string
+  line_number?: number
+  cve_ids?: string[]
+  status?: FindingStatus
+}
+
 // ── Chat types ──
 
 export interface ChatAttachment {

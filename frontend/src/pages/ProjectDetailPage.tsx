@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Trash2,
   FolderSearch,
+  ShieldAlert,
   Cpu,
   HardDrive,
   Hash,
@@ -183,12 +184,20 @@ export default function ProjectDetailPage() {
       )}
 
       {status === 'ready' && (
-        <Button asChild>
-          <Link to={`/projects/${project.id}/explore`}>
-            <FolderSearch className="mr-2 h-4 w-4" />
-            Explore Files
-          </Link>
-        </Button>
+        <div className="flex gap-3">
+          <Button asChild>
+            <Link to={`/projects/${project.id}/explore`}>
+              <FolderSearch className="mr-2 h-4 w-4" />
+              Explore Files
+            </Link>
+          </Button>
+          <Button variant="outline" asChild>
+            <Link to={`/projects/${project.id}/findings`}>
+              <ShieldAlert className="mr-2 h-4 w-4" />
+              Findings
+            </Link>
+          </Button>
+        </div>
       )}
 
       {status === 'error' && (
