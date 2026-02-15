@@ -88,6 +88,7 @@ Wairz is an open-source, browser-based firmware reverse engineering and security
 | RE: Unpacking | binwalk, sasquatch, jefferson, ubi_reader, cramfs-tools | Filesystem extraction |
 | RE: Binary | radare2 (r2pipe), pyelftools | Disassembly, ELF parsing |
 | RE: Decompile | Ghidra headless (via analyzeHeadless) | Pseudo-C decompilation |
+| Emulation | QEMU (user-mode + system-mode) | ARM, MIPS, x86 firmware emulation in isolated container |
 | AI | Anthropic Claude API (tool use, streaming) | claude-sonnet-4-20250514 for tool use |
 | Containers | Docker + Docker Compose | Local self-hosted deployment |
 | Testing | pytest (backend), Vitest (frontend) | Unit + integration |
@@ -231,6 +232,17 @@ wairz/
 │   └── scripts/
 │       └── DecompileFunction.java  # Ghidra script for decompilation
 │
+├── emulation/
+│   ├── Dockerfile               # QEMU emulation container
+│   ├── kernels/                 # Pre-built Linux kernels for emulation
+│   │   ├── vmlinux-arm-versatile
+│   │   ├── vmlinux-mips-malta
+│   │   ├── vmlinux-mipsel-malta
+│   │   └── vmlinux-x86
+│   └── scripts/
+│       ├── start-user-mode.sh   # chroot + qemu-user-static helper
+│       └── start-system-mode.sh # QEMU system-mode boot helper
+│
 └── scripts/
     ├── setup.sh                 # First-time setup helper
     └── test-firmware/           # Sample firmware for testing
@@ -308,6 +320,28 @@ CREATE TABLE analysis_cache (
 CREATE INDEX idx_cache_lookup ON analysis_cache(firmware_id, binary_sha256, operation);
 CREATE INDEX idx_findings_project ON findings(project_id);
 CREATE INDEX idx_conversations_project ON conversations(project_id);
+
+-- Emulation sessions (QEMU user-mode and system-mode)
+CREATE TABLE emulation_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+    firmware_id UUID REFERENCES firmware(id) ON DELETE CASCADE,
+    mode VARCHAR(20) NOT NULL,            -- 'user' or 'system'
+    status VARCHAR(20) DEFAULT 'created', -- created, starting, running, stopped, error
+    binary_path VARCHAR(512),             -- for user mode: which binary to run
+    arguments TEXT,                        -- for user mode: command-line arguments
+    architecture VARCHAR(50),             -- arm, mips, mipsel, x86
+    port_forwards JSONB DEFAULT '[]',     -- [{host: 8080, guest: 80}, ...]
+    container_id VARCHAR(100),            -- Docker container ID
+    pid INTEGER,                          -- QEMU process ID inside container
+    error_message TEXT,
+    started_at TIMESTAMPTZ,
+    stopped_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_emulation_project ON emulation_sessions(project_id);
+CREATE INDEX idx_emulation_status ON emulation_sessions(status);
 ```
 
 ---
@@ -358,6 +392,15 @@ These are the tools registered with the Claude API for the tool-use loop. Each t
 | `check_setuid_binaries` | `path?: str` | List of setuid/setgid binaries | Filesystem scan |
 | `analyze_init_scripts` | `path?: str` | Services started at boot, exposed ports, running as root | Parses init.d, systemd, inittab |
 | `check_filesystem_permissions` | `path?: str` | World-writable files, weak permissions on sensitive files | Recursive scan |
+
+### Emulation Tools (`tools/emulation.py`)
+
+| Tool | Parameters | Returns | Notes |
+|---|---|---|---|
+| `start_emulation` | `mode: str, binary_path?: str, arguments?: str, port_forwards?: list` | Session ID and connection info | mode: "user" or "system". User mode requires binary_path |
+| `run_command_in_emulation` | `session_id: str, command: str, timeout?: int` | Command stdout/stderr and exit code | Timeout default 30s, max 120s. For dynamic analysis |
+| `stop_emulation` | `session_id: str` | Confirmation message | Gracefully stops QEMU and cleans up container |
+| `check_emulation_status` | `session_id?: str` | Session status, uptime, resource usage | If no session_id, lists all active sessions for project |
 
 ### Reporting Tools (`tools/reporting.py`)
 
@@ -444,6 +487,13 @@ GET    /api/v1/projects/{id}/analysis/disasm?path=&function=  # Disassemble
 # Component Map
 GET    /api/v1/projects/{id}/component-map  # Build & return component dependency graph
 
+# Emulation
+POST   /api/v1/projects/{id}/emulation/start              # Start emulation session
+POST   /api/v1/projects/{id}/emulation/{sid}/stop          # Stop emulation session
+POST   /api/v1/projects/{id}/emulation/{sid}/exec          # Execute command in session
+GET    /api/v1/projects/{id}/emulation/sessions            # List active/recent sessions
+GET    /api/v1/projects/{id}/emulation/{sid}/status        # Session status + resource usage
+
 # Findings
 GET    /api/v1/projects/{id}/findings      # List findings
 POST   /api/v1/projects/{id}/findings      # Create finding
@@ -457,10 +507,11 @@ POST   /api/v1/projects/{id}/conversations  # Create conversation
 GET    /api/v1/projects/{id}/conversations/{cid}  # Get conversation
 ```
 
-### WebSocket Endpoint
+### WebSocket Endpoints
 
 ```
 WS /api/v1/projects/{id}/conversations/{cid}/ws
+WS /api/v1/projects/{id}/emulation/{sid}/terminal  # Interactive PTY to emulated system
 
 # Client sends:
 { "type": "user_message", "content": "Analyze the main web server binary" }
@@ -1143,17 +1194,565 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
 ---
 
-### Phase 7: Polish & Release (Sessions 26–29)
+### Phase 7: AI Decompiled Code Clean-up (Sessions 26–27)
 
-#### Session 7.1: Background Tasks & Status
+**Goal:** Add an AI-powered code cleanup feature to the decompiled code viewer that transforms raw Ghidra output into human-readable pseudo-C by renaming variables/functions, adding comments, and improving structure — without changing functionality.
+
+#### Session 7.1: Backend — AI Code Cleanup Service
+
+**Do:**
+- Create `app/services/code_cleanup_service.py`:
+  - `cleanup_decompiled_code(project_id, binary_path, function_name, raw_code)` → cleaned code string
+  - Calls Claude API with a specialized system prompt for code cleanup:
+    - Rename auto-generated variables (`uVar1`, `local_10`, `param_1`) to meaningful names based on usage context
+    - Rename auto-generated function names (`FUN_00401234`) to descriptive names based on behavior, or leave with a comment if unclear
+    - Add inline comments explaining non-obvious operations (bit manipulation, magic numbers, protocol handling)
+    - Add a function-level docstring summarizing purpose, parameters, and return value
+    - Preserve the original structure and logic — no functional changes
+    - Annotate security-relevant patterns (unchecked buffers, command injection, format strings)
+  - Include ELF context in the prompt: binary name, architecture, linked libraries, imported functions used in the function
+  - Cache results in `analysis_cache` with operation `code_cleanup:{function_name}` keyed by binary SHA256
+  - Non-streaming: return the full cleaned code (AI response is typically < 5KB)
+- Add endpoint to `app/routers/analysis.py`:
+  - `POST /api/v1/projects/{id}/analysis/cleanup` — accepts `{ binary_path, function_name }`, returns `{ original_code, cleaned_code }`
+  - First fetches the raw decompilation (from cache or Ghidra), then runs cleanup
+  - Cache the cleaned result separately from the raw decompilation
+- Add AI tool `cleanup_decompiled_code` to `app/ai/tools/binary.py`:
+  - Allows the AI assistant to clean up code on behalf of the user during chat
+  - Returns the cleaned code as a formatted text response
+
+**Definition of Done:**
+- API endpoint accepts a binary path and function name, returns AI-cleaned decompiled code
+- Variables and functions are renamed to meaningful names
+- Comments explain non-obvious logic
+- Security-relevant patterns are annotated
+- Results are cached per binary+function
+- AI chat assistant can invoke code cleanup via tool use
+
+#### Session 7.2: Frontend — Cleanup Code Viewer Integration
+
+**Do:**
+- Update the decompiled code viewer in `FileViewer.tsx` / binary analysis UI:
+  - Add a "Clean Up with AI" button next to the decompile button
+  - When clicked: show loading spinner, call the cleanup endpoint
+  - Display the cleaned code in Monaco with a toggle to switch between raw and cleaned views
+  - Use a split-view or tab UI: "Raw Decompilation" | "AI Cleaned"
+  - Syntax highlighting for C/pseudo-C in both views
+  - Diff highlighting: optionally show what the AI changed (renamed identifiers highlighted, added comments in a different color)
+- Add visual indicators:
+  - Badge showing "AI Cleaned" when viewing the cleaned version
+  - Tooltip showing the original auto-generated name when hovering over a renamed identifier (if feasible with Monaco decorations)
+- Add API client function in `src/api/analysis.ts`:
+  - `cleanupCode(projectId, binaryPath, functionName)` → `{ original_code, cleaned_code }`
+- Handle errors: show a message if cleanup fails (binary not found, Ghidra not available, API error)
+
+**Definition of Done:**
+- Button to trigger AI code cleanup appears in the decompiled code viewer
+- Cleaned code displays with proper syntax highlighting
+- Can toggle between raw and cleaned views
+- Renamed identifiers and added comments are visible
+- Loading and error states are handled
+
+---
+
+### Phase 8: Firmware Emulation (Sessions 28–31)
+
+**Goal:** Add firmware emulation capability using QEMU in a separate Docker container, allowing users to boot and interact with the firmware's userland for dynamic analysis and finding validation.
+
+#### Session 8.1: Emulation Infrastructure — Docker & QEMU Setup
+
+**Do:**
+- Create `emulation/Dockerfile`:
+  - Base: `debian:bookworm-slim` or `ubuntu:24.04`
+  - Install QEMU user-mode and system-mode: `qemu-system-arm`, `qemu-system-mips`, `qemu-system-mipsel`, `qemu-system-x86`, `qemu-user-static`
+  - Install supporting tools: `bridge-utils`, `iproute2`, `busybox-static`, `socat`
+  - Install filesystem tools for creating emulation images: `e2fsprogs`, `mount`, `kpartx`
+  - Non-root user for emulation processes
+  - Resource limits via Docker: CPU, memory, no host network access
+- Create `app/services/emulation_service.py`:
+  - `EmulationService` class managing emulation lifecycle:
+    - `prepare(firmware_id)` — analyze the extracted filesystem to determine:
+      - Architecture (ARM, MIPS, x86) and endianness from ELF binaries
+      - Init system (sysvinit, systemd, busybox init)
+      - Required kernel version (if `/lib/modules/` exists)
+      - Network configuration from `/etc/network/interfaces`, `/etc/config/network`
+    - `start(firmware_id, options)` — launch QEMU emulation:
+      - Use QEMU user-mode (`qemu-{arch}-static` + chroot) for simple single-binary execution
+      - Use QEMU system-mode for full OS boot (requires a matching kernel — bundle common embedded Linux kernels for ARM/MIPS)
+      - Mount the extracted filesystem as the root
+      - Set up virtual networking (TAP/bridge or user-mode networking with port forwarding)
+      - Return emulation session ID and connection details
+    - `stop(session_id)` — gracefully shut down QEMU, clean up resources
+    - `status(session_id)` — return running/stopped/error, uptime, resource usage
+    - `list_sessions(project_id)` — return all active/recent emulation sessions
+  - Session management: track active emulation sessions in the `emulation_sessions` DB table (see Database Schema section)
+  - Timeout: auto-stop emulations after `EMULATION_TIMEOUT_MINUTES` (default 30)
+  - Limit concurrent sessions per project: `EMULATION_MAX_SESSIONS` (default 3)
+  - Security: the emulation container runs on an isolated Docker network (`wairz_emulation_net`) with no internet access; firmware storage mounted read-only; resource-limited via `EMULATION_MEMORY_LIMIT_MB` and `EMULATION_CPU_LIMIT`
+- Backend ↔ emulation container communication:
+  - Use the **Docker SDK for Python** (`docker` package) to manage containers programmatically
+  - Each emulation session spawns a new container from the emulation image
+  - User-mode: `docker exec` into the container running `qemu-{arch}-static` + chroot
+  - System-mode: container runs QEMU system-mode with serial console exposed via `socat` on a Unix socket
+  - Terminal WebSocket connects to the container's PTY via `docker exec` attach or the `socat`-exposed serial console
+  - Command execution (`run_command_in_emulation`) uses `docker exec` with timeout enforcement
+- Create SQLAlchemy model `app/models/emulation_session.py`:
+  ```python
+  class EmulationSession(Base):
+      __tablename__ = "emulation_sessions"
+      id: Mapped[uuid.UUID]              # PK
+      project_id: Mapped[uuid.UUID]      # FK → projects
+      firmware_id: Mapped[uuid.UUID]     # FK → firmware
+      mode: Mapped[str]                  # "user" or "system"
+      status: Mapped[str]                # created, starting, running, stopped, error
+      binary_path: Mapped[str | None]    # user mode: target binary
+      arguments: Mapped[str | None]      # user mode: CLI arguments
+      architecture: Mapped[str | None]   # arm, mips, mipsel, x86
+      port_forwards: Mapped[dict | None] # JSONB: [{host, guest}]
+      container_id: Mapped[str | None]   # Docker container ID
+      pid: Mapped[int | None]            # QEMU PID inside container
+      error_message: Mapped[str | None]
+      started_at / stopped_at / created_at
+  ```
+- Create Alembic migration for the `emulation_sessions` table
+- Bundle a set of pre-built Linux kernels for common architectures:
+  - ARM (versatile-pb, vexpress-a9) — common for router firmware
+  - MIPS/MIPSel (Malta) — common for router firmware
+  - x86 — for x86-based embedded devices
+  - Store in `emulation/kernels/` directory
+
+**Definition of Done:**
+- Emulation Docker container builds with QEMU for ARM, MIPS, x86
+- Service can analyze firmware and determine emulation parameters
+- Can start a QEMU user-mode chroot for running individual binaries
+- Can start a QEMU system-mode boot for full OS emulation (with bundled kernel)
+- Sessions are tracked and auto-stopped after timeout
+- Emulation runs in an isolated, sandboxed container
+
+#### Session 8.2: Emulation API & Terminal Integration
+
+**Do:**
+- Create Pydantic schemas in `app/schemas/emulation.py`:
+  ```python
+  class EmulationStartRequest(BaseModel):
+      mode: Literal["user", "system"]
+      binary_path: str | None = None       # required for user mode
+      arguments: str | None = None          # optional CLI args for user mode
+      port_forwards: list[PortForward] = [] # [{host: int, guest: int}]
+
+  class PortForward(BaseModel):
+      host: int  # port on the host/backend side
+      guest: int # port inside the emulated system
+
+  class EmulationSessionResponse(BaseModel):
+      id: str
+      project_id: str
+      mode: str
+      status: str
+      architecture: str | None
+      binary_path: str | None
+      port_forwards: list[PortForward]
+      started_at: str | None
+      created_at: str
+
+  class EmulationStatusResponse(EmulationSessionResponse):
+      uptime_seconds: int | None
+      container_id: str | None
+
+  class EmulationExecRequest(BaseModel):
+      command: str
+      timeout: int = 30  # seconds, max 120
+
+  class EmulationExecResponse(BaseModel):
+      stdout: str
+      stderr: str
+      exit_code: int
+      timed_out: bool
+  ```
+- Create `app/routers/emulation.py`:
+  - `POST /api/v1/projects/{id}/emulation/start` — validates firmware exists and is unpacked, resolves architecture, creates DB record, starts container via `EmulationService.start()`, returns `EmulationSessionResponse`
+    - User mode: validates `binary_path` against extracted root (path traversal prevention)
+    - System mode: selects matching kernel from `EMULATION_KERNEL_DIR`
+    - Enforces `EMULATION_MAX_SESSIONS` per project
+  - `POST /api/v1/projects/{id}/emulation/{session_id}/stop` — calls `EmulationService.stop()`, updates DB status, returns updated session
+  - `POST /api/v1/projects/{id}/emulation/{session_id}/exec` — accepts `EmulationExecRequest`, runs command in container, returns `EmulationExecResponse`
+  - `GET /api/v1/projects/{id}/emulation/sessions` — list all sessions for project, ordered by `created_at` desc
+  - `GET /api/v1/projects/{id}/emulation/{session_id}/status` — returns `EmulationStatusResponse` with live container info
+  - `WS /api/v1/projects/{id}/emulation/{session_id}/terminal` — WebSocket for interactive terminal access:
+    - On connect: attach to container PTY via Docker SDK `exec_start(socket=True)`
+    - Bidirectional: WS text frames → container stdin, container stdout → WS text frames
+    - Handle xterm.js resize events (`{ type: "resize", cols: int, rows: int }`)
+    - On disconnect: detach but don't stop the session
+- Register router in `app/main.py`
+- Update `docker-compose.yml`:
+  - Add `emulation` service with the emulation Dockerfile
+  - Isolated network `wairz_emulation_net` (no internet access for emulated firmware)
+  - Volume mount for firmware storage (read-only: `${STORAGE_ROOT}:/data/firmware:ro`)
+  - Volume mount for kernels: `./emulation/kernels:/opt/kernels:ro`
+  - Resource limits: `mem_limit: ${EMULATION_MEMORY_LIMIT_MB}m`, `cpus: ${EMULATION_CPU_LIMIT}`
+  - Backend service gets access to Docker socket (`/var/run/docker.sock`) to manage emulation containers
+
+**Definition of Done:**
+- API endpoints for starting/stopping/monitoring emulation sessions work
+- WebSocket terminal provides interactive shell access to the emulated firmware
+- Port forwarding allows accessing emulated services from the host
+- Command execution endpoint returns stdout/stderr with timeout enforcement
+- Emulation container is properly isolated on its own Docker network
+- Concurrent session limit is enforced
+
+#### Session 8.3: Emulation Frontend
+
+**Do:**
+- Add types to `frontend/src/types/index.ts`:
+  ```typescript
+  type EmulationMode = 'user' | 'system'
+  type EmulationStatus = 'created' | 'starting' | 'running' | 'stopped' | 'error'
+
+  interface PortForward {
+    host: number
+    guest: number
+  }
+
+  interface EmulationSession {
+    id: string
+    project_id: string
+    mode: EmulationMode
+    status: EmulationStatus
+    architecture: string | null
+    binary_path: string | null
+    arguments: string | null
+    port_forwards: PortForward[]
+    error_message: string | null
+    started_at: string | null
+    stopped_at: string | null
+    created_at: string
+  }
+
+  interface EmulationStatusResponse extends EmulationSession {
+    uptime_seconds: number | null
+    container_id: string | null
+  }
+
+  interface EmulationExecResponse {
+    stdout: string
+    stderr: string
+    exit_code: number
+    timed_out: boolean
+  }
+  ```
+- Create API client `frontend/src/api/emulation.ts`:
+  - `startEmulation(projectId, request)` → `EmulationSession`
+  - `stopEmulation(projectId, sessionId)` → `EmulationSession`
+  - `execInEmulation(projectId, sessionId, command, timeout?)` → `EmulationExecResponse`
+  - `listSessions(projectId)` → `EmulationSession[]`
+  - `getSessionStatus(projectId, sessionId)` → `EmulationStatusResponse`
+- Create `frontend/src/pages/EmulationPage.tsx` (or add to `ExplorePage.tsx` as a panel):
+  - Emulation control panel:
+    - "Start Emulation" button with mode selection (User mode / System mode)
+    - For user mode: file picker to select which binary to run, with argument input
+    - For system mode: optional port forwarding configuration (add/remove rows: host port ↔ guest port)
+    - Architecture auto-detected from firmware metadata, shown as read-only badge
+  - Active session display:
+    - Status indicator with color coding (starting=yellow, running=green, stopped=gray, error=red)
+    - Uptime counter and architecture badge
+    - Stop button (with confirmation for system-mode sessions)
+    - Terminal tab/panel for interactive access
+  - Terminal integration:
+    - Reuse or extend `TerminalPanel.tsx` for the emulation terminal
+    - Connect via WebSocket to `/api/v1/projects/{id}/emulation/{sid}/terminal`
+    - Full xterm.js terminal with proper key handling and resize events
+    - Show connection status indicator in terminal header
+  - Session history: table of past emulation sessions with mode, status, duration, start/stop times
+    - Click a running session to reconnect terminal
+    - Click a stopped session to see error message (if any)
+- Add route: `/projects/:id/emulation` accessible from project sidebar
+- Add "Emulation" navigation item to the project sidebar with a play-circle icon
+- Create `frontend/src/stores/emulationStore.ts` (Zustand) if needed for session state tracking across components
+
+**Definition of Done:**
+- Can start/stop firmware emulation from the UI
+- Interactive terminal connects to the emulated system
+- Can run individual binaries in user mode
+- Can boot the full firmware in system mode
+- Port forwarding configuration UI works
+- Session history is displayed with status indicators
+- Terminal reconnects when navigating back to a running session
+
+#### Session 8.4: Emulation AI Integration
+
+**Do:**
+- Create `app/ai/tools/emulation.py` with tool handlers:
+  - `_handle_start_emulation(input, context)` — calls `EmulationService.start()`, returns session ID and status. Validates binary path for user mode. Limits to one active AI-initiated session per conversation to prevent resource exhaustion
+  - `_handle_run_command_in_emulation(input, context)` — validates session exists and is running, executes command via `EmulationService.exec()`, returns stdout/stderr. Truncates output to `MAX_TOOL_OUTPUT_KB`. Default timeout 30s, max 120s
+  - `_handle_stop_emulation(input, context)` — stops the session, returns confirmation
+  - `_handle_check_emulation_status(input, context)` — returns session status, uptime, and whether the system has booted (for system mode). If no session_id given, lists all active sessions for the project
+- Register all emulation tools via `register_emulation_tools(registry)`, called from `app/ai/tools/__init__.py`
+- Update system prompt in `app/ai/system_prompt.py` to include emulation guidance:
+  ```
+  Emulation capabilities:
+  - You can start QEMU-based emulation to dynamically test the firmware
+  - User mode: run a single binary in a chroot (fast, good for testing specific programs)
+  - System mode: boot the full firmware OS (slower, good for testing services and network behavior)
+  - Use emulation to VALIDATE static findings: test if default credentials work, check if services are accessible, verify network behavior
+  - Caveats: emulated firmware may behave differently than on real hardware (missing peripherals, different timing, no flash storage). Note these limitations when reporting findings
+  - Always stop emulation sessions when done to free resources
+  ```
+- Add a context menu option in the file explorer: "Run in Emulation" for ELF binaries
+  - In `FileTree.tsx`: detect ELF files from `fileInfo.elf_info`, add right-click menu item
+  - Click navigates to the emulation page with `?binary=<path>` pre-filled, or opens a small dialog to configure and start user-mode emulation directly
+- Add a context menu option in the chat: when AI mentions running a binary, show a quick-action button to "Open in Emulation"
+
+**Definition of Done:**
+- AI can start emulation, run commands, and stop sessions via tool use
+- AI uses emulation to validate findings (e.g., "let me check if this service actually exposes the default credentials by starting system-mode emulation and connecting")
+- Right-click → "Run in Emulation" works for ELF binaries in the file tree
+- AI explains caveats about emulation vs. real hardware in its analysis
+- Tool output is properly truncated for large command outputs
+- AI cleans up sessions after analysis is complete
+
+---
+
+### Phase 9: Automated Fuzzing (Sessions 32–35)
+
+**Goal:** Integrate AFL++ fuzzing into the emulation environment with AI assistance for target selection, harness/shim generation, and crash triage, enabling automated vulnerability discovery in firmware binaries.
+
+#### Session 9.1: Fuzzing Infrastructure — AFL++ Integration
+
+**Do:**
+- Update `emulation/Dockerfile` (or create a dedicated `fuzzing/Dockerfile`):
+  - Install AFL++ with QEMU mode support: `afl-fuzz`, `afl-qemu-trace`, `afl-cmin`, `afl-tmin`
+  - Install cross-architecture compilers for instrumented builds: `gcc-arm-linux-gnueabi`, `gcc-mipsel-linux-gnu` (if re-compilation is feasible)
+  - Install crash analysis tools: `gdb-multiarch`, `exploitable` (GDB plugin)
+  - Install `afl-utils` for crash deduplication and triage
+- Create `app/services/fuzzing_service.py`:
+  - `FuzzingService` class:
+    - `analyze_target(project_id, binary_path)` — static analysis to identify fuzzing-relevant info:
+      - Input sources: file parsing (argc/argv), stdin readers, network listeners (socket/accept)
+      - Interesting functions: parse, decode, decompress, authenticate, handle_request
+      - Recommended fuzzing strategy: file-based, stdin, network
+      - Estimated complexity (binary size, number of basic blocks)
+    - `create_campaign(project_id, binary_path, config)` — set up a fuzzing campaign:
+      - Config: target binary, input corpus directory, dictionary, timeout, memory limit, QEMU mode arch
+      - Generate or accept initial seed corpus
+      - Set up AFL++ working directories (input, output, crashes, hangs)
+    - `start_campaign(campaign_id)` — launch AFL++ with QEMU mode (`afl-fuzz -Q`)
+    - `stop_campaign(campaign_id)` — stop the fuzzer
+    - `get_campaign_status(campaign_id)` — parse AFL++ stats: executions/sec, paths found, crashes, hangs, coverage bitmap
+    - `get_crashes(campaign_id)` — list crash inputs with deduplication
+    - `triage_crash(campaign_id, crash_id)` — reproduce crash, get stack trace via GDB, classify exploitability
+  - Campaign persistence: store campaigns in a DB table (`fuzzing_campaigns`)
+  - Resource management: limit concurrent fuzzing campaigns per project (default: 1)
+
+**Definition of Done:**
+- AFL++ with QEMU mode can fuzz ARM/MIPS/x86 binaries from the extracted firmware
+- Campaigns can be created, started, stopped, and monitored
+- Crash inputs are collected and deduplicated
+- Crash triage produces stack traces and exploitability classification
+
+#### Session 9.2: Fuzzing API & Database
+
+**Do:**
+- Create Alembic migration for `fuzzing_campaigns` table:
+  ```sql
+  CREATE TABLE fuzzing_campaigns (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+      firmware_id UUID REFERENCES firmware(id) ON DELETE CASCADE,
+      binary_path VARCHAR(512) NOT NULL,
+      status VARCHAR(20) DEFAULT 'created',  -- created, running, stopped, completed, error
+      config JSONB,                           -- AFL++ configuration
+      stats JSONB,                            -- latest fuzzer statistics
+      crashes_count INTEGER DEFAULT 0,
+      started_at TIMESTAMPTZ,
+      stopped_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  ```
+- Create Pydantic schemas in `app/schemas/fuzzing.py`
+- Create `app/routers/fuzzing.py`:
+  - `POST /api/v1/projects/{id}/fuzzing/campaigns` — create a new fuzzing campaign
+  - `POST /api/v1/projects/{id}/fuzzing/campaigns/{cid}/start` — start fuzzing
+  - `POST /api/v1/projects/{id}/fuzzing/campaigns/{cid}/stop` — stop fuzzing
+  - `GET /api/v1/projects/{id}/fuzzing/campaigns` — list campaigns
+  - `GET /api/v1/projects/{id}/fuzzing/campaigns/{cid}` — campaign details + stats
+  - `GET /api/v1/projects/{id}/fuzzing/campaigns/{cid}/crashes` — list crash inputs
+  - `POST /api/v1/projects/{id}/fuzzing/campaigns/{cid}/crashes/{crash_id}/triage` — triage a crash
+  - `GET /api/v1/projects/{id}/fuzzing/analyze?path=` — analyze a binary for fuzzing suitability
+- Register router in `app/main.py`
+
+**Definition of Done:**
+- All CRUD and lifecycle endpoints work for fuzzing campaigns
+- Campaign stats update in real-time (or near-real-time via polling)
+- Crash list and triage endpoints return useful data
+- Binary analysis endpoint identifies good fuzzing targets
+
+#### Session 9.3: Fuzzing Frontend
+
+**Do:**
+- Create `frontend/src/pages/FuzzingPage.tsx`:
+  - Campaign list: shows all fuzzing campaigns with status, duration, crashes found
+  - Campaign creation wizard:
+    1. Select target binary (file picker from extracted filesystem)
+    2. Show AI analysis of the binary (fuzzing suitability, recommended strategy)
+    3. Configure options: timeout per execution, memory limit, custom dictionary, seed corpus upload
+    4. Start fuzzing
+  - Active campaign dashboard:
+    - Real-time stats: executions/sec, total executions, paths discovered, crashes, hangs
+    - Coverage progress chart (paths over time)
+    - Crash list with severity indicators
+    - Stop/restart controls
+  - Crash detail view:
+    - Crash input (hex dump)
+    - Stack trace
+    - Exploitability classification (exploitable, probably exploitable, probably not, unknown)
+    - Button to create a finding from a crash
+    - Button to reproduce in emulation
+- Add route: `/projects/:id/fuzzing`
+- Add "Fuzzing" navigation item to the project sidebar
+- Add API client functions in `src/api/fuzzing.ts`
+- Add types to `src/types/index.ts`: `FuzzingCampaign`, `FuzzingStats`, `FuzzingCrash`, etc.
+
+**Definition of Done:**
+- Can create, start, stop, and monitor fuzzing campaigns from the UI
+- Real-time stats dashboard shows fuzzing progress
+- Crash list displays with severity and triage info
+- Can create security findings from discovered crashes
+- Campaign wizard guides users through setup
+
+#### Session 9.4: Fuzzing AI Integration — Smart Target Selection & Harness Generation
+
+**Do:**
+- Add fuzzing-related AI tools to `app/ai/tools/`:
+  - `analyze_fuzzing_target` — analyze a binary and recommend fuzzing strategy, input format, and interesting functions to target
+  - `generate_fuzzing_harness` — generate a C shim/harness for fuzzing a specific function:
+    - Wraps the target function with AFL's `__AFL_LOOP` for persistent mode (if recompilation is possible)
+    - Creates a standalone harness that reads from stdin/file and calls the target function
+    - Handles library dependencies and initialization
+  - `generate_fuzzing_dictionary` — analyze the binary's strings, protocol keywords, and magic bytes to generate an AFL dictionary file
+  - `generate_seed_corpus` — create initial seed inputs based on the binary's expected input format (file headers, protocol messages, config syntax)
+  - `start_fuzzing_campaign` — start a fuzzing campaign with AI-recommended settings
+  - `check_fuzzing_status` — check campaign progress
+  - `triage_fuzzing_crash` — analyze a crash and explain the vulnerability
+- Update system prompt to include fuzzing workflow:
+  - AI should proactively suggest fuzzing targets during security assessment
+  - AI should explain its fuzzing strategy choices
+  - AI should triage crashes and determine exploitability
+  - AI should generate findings for confirmed crashes
+- Smart target selection heuristics (used by both AI and binary analysis endpoint):
+  - Prioritize binaries that: parse untrusted input (file formats, network protocols), are network-facing, lack binary protections (no canaries, no ASLR), have known dangerous function calls (strcpy, sprintf, system)
+  - Score and rank targets by fuzzing value
+
+**Definition of Done:**
+- AI can recommend the best fuzzing targets and explain why
+- AI can generate harnesses and dictionaries for selected targets
+- AI can start fuzzing campaigns and monitor progress
+- AI triages crashes and creates findings with vulnerability descriptions
+- The fuzzing workflow is AI-guided but user-controllable
+
+---
+
+### Phase 10: Project Export & Import (Sessions 36–38)
+
+**Goal:** Enable users to export entire projects as portable archive files and import them on another instance, supporting team collaboration, project sharing, and backup/restore workflows. This phase is intentionally last (before polish) so the archive format captures all features: findings, conversations, documents, analysis cache, emulation configs, and fuzzing campaigns.
+
+#### Session 10.1: Export Backend — Project Archive Builder
+
+**Do:**
+- Create `app/services/export_service.py` — builds a self-contained project archive:
+  - Archive format: ZIP file containing:
+    - `manifest.json` — archive version, export timestamp, source instance info
+    - `project.json` — project metadata (name, description, status, created_at, etc.)
+    - `firmware.json` — firmware metadata (original_filename, sha256, architecture, endianness, os_info, unpack_log)
+    - `firmware/original/` — the original uploaded firmware blob
+    - `firmware/extracted/` — the full unpacked filesystem tree (preserve permissions via tar within the zip, or store a `permissions.json` manifest)
+    - `conversations/` — one JSON file per conversation with full message history
+    - `findings/` — all findings as JSON (title, severity, description, evidence, file_path, status, cve_ids)
+    - `documents/` — project documents (notes) with metadata and content
+    - `analysis_cache/` — cached analysis results (component map, Ghidra decompilations, code cleanups, etc.) as JSON keyed by operation
+    - `fuzzing_campaigns/` — fuzzing campaign configs, stats, and crash inputs
+    - `reviews/` — security review results and agent findings
+  - Stream the ZIP to avoid loading everything into memory — use `zipfile.ZipFile` with a streaming response or write to a temp file
+  - Include a progress callback for future real-time status updates
+- Create `app/routers/export_import.py`:
+  - `POST /api/v1/projects/{id}/export` — triggers archive creation, returns the ZIP as a streaming file download
+  - Set `Content-Disposition: attachment; filename="{project_name}_{date}.wairz"` header
+  - Use `.wairz` file extension (it's a ZIP internally) for branding
+- Validate that the project exists and has firmware before allowing export
+- Handle large projects: set a reasonable timeout (10 minutes), stream the response
+
+**Definition of Done:**
+- Can export a project with unpacked firmware to a `.wairz` archive
+- Archive contains all project data: metadata, firmware, filesystem, conversations, findings, documents, cache, fuzzing campaigns, reviews
+- Download starts promptly even for large projects (streaming)
+- Archive can be opened as a standard ZIP for inspection
+
+#### Session 10.2: Import Backend — Project Archive Importer
+
+**Do:**
+- Add import logic to `app/services/export_service.py` (or create `app/services/import_service.py`):
+  - Validate the uploaded archive:
+    - Must be a valid ZIP
+    - Must contain `manifest.json` with a recognized version
+    - Must contain `project.json` and `firmware.json`
+  - Create a new project from `project.json` (generate new UUID, preserve name/description)
+  - Restore firmware metadata from `firmware.json` (generate new firmware UUID)
+  - Extract `firmware/original/` to the storage root
+  - Extract `firmware/extracted/` to the storage root (restore file permissions from manifest if available)
+  - Restore conversations, findings, documents, analysis cache, fuzzing campaigns, and reviews into the database
+  - Remap all UUIDs: project_id, firmware_id, conversation_ids, finding_ids, document_ids, campaign_ids, review_ids — generate new ones while preserving internal references
+  - Set project status to `ready` if extracted filesystem is present, otherwise `created`
+- Add to `app/routers/export_import.py`:
+  - `POST /api/v1/projects/import` — accepts a multipart file upload of a `.wairz` archive
+  - Returns the newly created project metadata
+  - Validate archive size (use `MAX_UPLOAD_SIZE_MB` setting or a separate limit)
+- Security: validate all paths within the archive against path traversal (zip slip prevention)
+- Register router in `app/main.py`
+
+**Definition of Done:**
+- Can import a `.wairz` archive and get a fully functional project
+- All data is restored: firmware, filesystem, conversations, findings, documents, cache, fuzzing campaigns, reviews
+- Imported project works identically to the original (can browse files, view findings, chat with AI, see fuzzing results)
+- ZIP slip and path traversal attacks are prevented
+- Duplicate imports create separate projects (no conflicts)
+
+#### Session 10.3: Export/Import Frontend
+
+**Do:**
+- Add export button to `ProjectDetailPage.tsx`:
+  - Button in the project header/actions area: "Export Project"
+  - Shows a loading/progress indicator while the archive is being built
+  - Triggers file download when complete
+  - Disable during export to prevent double-clicks
+- Add import functionality to `ProjectsPage.tsx`:
+  - "Import Project" button alongside "Create Project"
+  - File picker that accepts `.wairz` files
+  - Upload progress bar (reuse `FirmwareUpload.tsx` pattern)
+  - On success: redirect to the imported project's detail page
+  - Error handling: show clear messages for invalid archives, corrupt files, etc.
+- Add API client functions in `src/api/projects.ts`:
+  - `exportProject(projectId)` — returns a download URL or triggers blob download
+  - `importProject(file: File)` — uploads the archive, returns the new project
+- Update `projectStore.ts` if needed for import state tracking
+
+**Definition of Done:**
+- Can export a project from the UI and download a `.wairz` file
+- Can import a `.wairz` file from the UI and see the restored project
+- Progress indicators show during both export and import
+- Error messages are clear and actionable
+
+---
+
+### Phase 11: Polish & Release (Sessions 39–42)
+
+#### Session 11.1: Background Tasks & Status
 
 **Do:**
 - Set up `arq` worker with Redis
 - Move firmware unpacking to background worker
 - Add real-time status updates via WebSocket or polling
-- Add progress indicators for long-running operations (Ghidra analysis, full scan)
+- Add progress indicators for long-running operations (Ghidra analysis, full scan, emulation startup, fuzzing)
 
-#### Session 7.2: Error Handling & Edge Cases
+#### Session 11.2: Error Handling & Edge Cases
 
 **Do:**
 - Handle: corrupt firmware, unsupported formats, very large files, empty filesystems
@@ -1161,8 +1760,9 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Add rate limiting on API endpoints
 - Add graceful shutdown handling
 - Comprehensive error messages for users
+- Handle emulation and fuzzing edge cases (unsupported architectures, missing kernels, insufficient resources)
 
-#### Session 7.3: Documentation & Testing
+#### Session 11.3: Documentation & Testing
 
 **Do:**
 - Write comprehensive `README.md`:
@@ -1174,9 +1774,12 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Write API documentation (FastAPI auto-generates OpenAPI, but add descriptions)
 - Add integration tests for critical paths:
   - Upload → unpack → browse → AI analysis → finding creation
+  - Export → import round-trip
+  - Emulation start → terminal → stop
+  - Fuzzing campaign lifecycle
 - Add example firmware images for testing (OpenWrt, DD-WRT, etc.)
 
-#### Session 7.4: Final Integration & Release
+#### Session 11.4: Final Integration & Release
 
 **Do:**
 - End-to-end testing of full workflow
@@ -1197,7 +1800,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
    - Resource limits (CPU, memory, disk)
    - Non-root execution
    - Read-only bind mounts where possible
-3. **Never execute binaries from the firmware.** Analysis only, no running extracted code.
+3. **Never execute firmware binaries on the host.** All static analysis is read-only. The only exception is the emulation subsystem (Phase 8), which runs firmware inside an isolated QEMU container with no host network access, resource limits, and a non-root user. The emulation container must be treated as untrusted — it should never share volumes read-write with the backend or have access to credentials.
 4. **Anthropic API key** should be user-provided or stored securely (not in the image).
 
 ### Performance
@@ -1238,6 +1841,11 @@ MAX_UPLOAD_SIZE_MB=500
 MAX_TOOL_OUTPUT_KB=30
 MAX_TOOL_ITERATIONS=25
 GHIDRA_PATH=/opt/ghidra
+EMULATION_TIMEOUT_MINUTES=30
+EMULATION_KERNEL_DIR=/opt/emulation/kernels
+EMULATION_MAX_SESSIONS=3
+EMULATION_MEMORY_LIMIT_MB=512
+EMULATION_CPU_LIMIT=1.0
 LOG_LEVEL=INFO
 ```
 
