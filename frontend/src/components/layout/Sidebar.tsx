@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useParams, useNavigate } from 'react-router-dom'
 import {
-  Shield,
   PanelLeftClose,
-  PanelLeftOpen,
   FolderOpen,
   ChevronRight,
   LayoutDashboard,
@@ -12,6 +10,8 @@ import {
   HelpCircle,
 } from 'lucide-react'
 import { Separator } from '@/components/ui/separator'
+import wairzLogo from '@/assets/wairz_full_logo.png'
+import wairzIcon from '@/assets/wairz_logo.png'
 import { useProjectStore } from '@/stores/projectStore'
 
 interface SidebarProps {
@@ -54,10 +54,10 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         <div className="flex h-14 items-center justify-center">
           <button
             onClick={onToggle}
-            className="rounded p-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            className="rounded p-1.5 hover:bg-sidebar-accent"
             title="Expand sidebar"
           >
-            <PanelLeftOpen className="h-5 w-5" />
+            <img src={wairzIcon} alt="Wairz" className="h-6 w-6 invert" />
           </button>
         </div>
         <Separator />
@@ -98,8 +98,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   return (
     <aside className="flex h-full w-64 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
       <div className="flex h-14 items-center gap-2 px-4">
-        <Shield className="h-6 w-6 text-primary" />
-        <span className="text-lg font-semibold tracking-tight">Wairz</span>
+        <img src={wairzLogo} alt="Wairz" className="w-40 invert" />
         <button
           onClick={onToggle}
           className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
