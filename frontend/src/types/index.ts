@@ -108,6 +108,13 @@ export interface BinaryInfoResponse {
   protections: BinaryProtections
 }
 
+export interface CodeCleanupResponse {
+  binary_path: string
+  function: string
+  raw_code: string
+  cleaned_code: string
+}
+
 // ── Model types ──
 
 export interface ModelOption {

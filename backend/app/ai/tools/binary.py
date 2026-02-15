@@ -1,12 +1,17 @@
 """Binary analysis AI tools using radare2, pyelftools, and Ghidra."""
 
+import logging
+
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.services.analysis_service import (
     check_binary_protections,
     get_session_cache,
 )
+from app.services.code_cleanup_service import cleanup_decompiled_code
 from app.services.ghidra_service import decompile_function
 from app.utils.sandbox import validate_path
+
+logger = logging.getLogger(__name__)
 
 
 async def _handle_list_functions(input: dict, context: ToolContext) -> str:
@@ -237,6 +242,54 @@ async def _handle_decompile_function(input: dict, context: ToolContext) -> str:
     return f"Decompiled output for {function_name}:\n\n{result}"
 
 
+async def _handle_cleanup_decompiled_code(input: dict, context: ToolContext) -> str:
+    """Clean up decompiled code using AI to rename variables and add comments."""
+    path = validate_path(context.extracted_path, input["binary_path"])
+    function_name = input["function_name"]
+
+    # Get raw decompilation
+    try:
+        raw_code = await decompile_function(
+            binary_path=path,
+            function_name=function_name,
+            firmware_id=context.firmware_id,
+            db=context.db,
+        )
+    except FileNotFoundError:
+        return f"Error: Binary not found at '{input['binary_path']}'."
+    except TimeoutError as exc:
+        return f"Error: {exc}"
+    except RuntimeError as exc:
+        return f"Error: {exc}"
+
+    # Get R2 context (best-effort)
+    binary_info = None
+    imports = None
+    try:
+        cache = get_session_cache()
+        session = await cache.get_session(path)
+        binary_info = session.get_binary_info()
+        imports = session.get_imports()
+    except Exception:
+        logger.debug("Could not get R2 context for cleanup tool, proceeding without it")
+
+    # Run AI cleanup
+    try:
+        cleaned = await cleanup_decompiled_code(
+            raw_code=raw_code,
+            function_name=function_name,
+            binary_path=path,
+            binary_info=binary_info,
+            imports=imports,
+            firmware_id=context.firmware_id,
+            db=context.db,
+        )
+    except RuntimeError as exc:
+        return f"Error during AI cleanup: {exc}"
+
+    return f"AI-cleaned decompilation of {function_name}:\n\n{cleaned}"
+
+
 def register_binary_tools(registry: ToolRegistry) -> None:
     """Register all binary analysis tools with the given registry."""
 
@@ -442,4 +495,31 @@ def register_binary_tools(registry: ToolRegistry) -> None:
             "required": ["binary_path"],
         },
         handler=_handle_check_binary_protections,
+    )
+
+    registry.register(
+        name="cleanup_decompiled_code",
+        description=(
+            "Clean up raw Ghidra decompiled code using AI. Renames auto-generated "
+            "variables (uVar1, local_10) and functions (FUN_00401234) to meaningful "
+            "names, adds inline comments explaining non-obvious logic, adds a "
+            "function docstring, and annotates security-relevant patterns with "
+            "[SECURITY] comments. Results are cached per binary+function. "
+            "Use after decompile_function when you want more readable output."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the ELF binary in the firmware filesystem",
+                },
+                "function_name": {
+                    "type": "string",
+                    "description": "Function name to clean up (e.g. 'main', 'auth_check'). Use list_functions to find available names.",
+                },
+            },
+            "required": ["binary_path", "function_name"],
+        },
+        handler=_handle_cleanup_decompiled_code,
     )

@@ -1,9 +1,11 @@
 """REST endpoints for binary analysis: functions, disassembly, decompilation, protections."""
 
 import asyncio
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -11,9 +13,12 @@ from app.services.analysis_service import (
     check_binary_protections,
     get_session_cache,
 )
+from app.services.code_cleanup_service import cleanup_decompiled_code
 from app.services.firmware_service import FirmwareService
 from app.services.ghidra_service import decompile_function as ghidra_decompile
 from app.utils.sandbox import validate_path
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/analysis",
@@ -156,4 +161,64 @@ async def decompile_function(
         "binary_path": path,
         "function": function,
         "decompiled_code": decompiled,
+    }
+
+
+class CleanupRequest(BaseModel):
+    binary_path: str
+    function_name: str
+
+
+@router.post("/cleanup")
+async def cleanup_code(
+    request: CleanupRequest,
+    firmware=Depends(_resolve_firmware),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clean up decompiled code using AI to rename variables, add comments, and annotate security patterns."""
+    try:
+        full_path = validate_path(firmware.extracted_path, request.binary_path)
+    except Exception:
+        raise HTTPException(403, "Invalid path")
+
+    # Get raw decompilation (from cache or Ghidra)
+    try:
+        raw_code = await ghidra_decompile(full_path, request.function_name, firmware.id, db)
+    except FileNotFoundError:
+        raise HTTPException(404, f"Binary not found: {request.binary_path}")
+    except TimeoutError as e:
+        raise HTTPException(504, str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    # Get binary context (best-effort — proceed with None if R2 fails)
+    binary_info = None
+    imports = None
+    try:
+        cache = get_session_cache()
+        session = await cache.get_session(full_path)
+        binary_info = session.get_binary_info()
+        imports = session.get_imports()
+    except Exception:
+        logger.debug("Could not get R2 context for cleanup, proceeding without it")
+
+    # Run AI cleanup
+    try:
+        cleaned = await cleanup_decompiled_code(
+            raw_code=raw_code,
+            function_name=request.function_name,
+            binary_path=full_path,
+            binary_info=binary_info,
+            imports=imports,
+            firmware_id=firmware.id,
+            db=db,
+        )
+    except RuntimeError as e:
+        raise HTTPException(502, f"AI cleanup failed: {e}")
+
+    return {
+        "binary_path": request.binary_path,
+        "function": request.function_name,
+        "raw_code": raw_code,
+        "cleaned_code": cleaned,
     }
