@@ -32,6 +32,7 @@ class ProjectContext:
     architecture: str | None
     endianness: str | None
     extracted_path: str
+    documents: list[dict] | None = None
 
 
 class AIOrchestrator:
@@ -66,6 +67,7 @@ class AIOrchestrator:
             architecture=project_context.architecture,
             endianness=project_context.endianness,
             extracted_path=project_context.extracted_path,
+            documents=project_context.documents,
         )
 
         tool_context = ToolContext(

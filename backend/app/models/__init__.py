@@ -3,5 +3,6 @@ from app.models.firmware import Firmware
 from app.models.conversation import Conversation
 from app.models.analysis_cache import AnalysisCache
 from app.models.finding import Finding
+from app.models.document import Document
 
-__all__ = ["Project", "Firmware", "Conversation", "AnalysisCache", "Finding"]
+__all__ = ["Project", "Firmware", "Conversation", "AnalysisCache", "Finding", "Document"]

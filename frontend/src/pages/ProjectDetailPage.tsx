@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatFileSize, formatDate } from '@/utils/format'
 import FirmwareUpload from '@/components/projects/FirmwareUpload'
+import DocumentsCard from '@/components/projects/DocumentsCard'
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   ready: 'default',
@@ -156,6 +157,9 @@ export default function ProjectDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Project documents — always visible */}
+      <DocumentsCard projectId={project.id} />
 
       {/* Action section based on status */}
       {status === 'created' && !firmware && (

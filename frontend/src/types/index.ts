@@ -186,6 +186,27 @@ export interface FindingUpdate {
   status?: FindingStatus
 }
 
+// ── Document types ──
+
+export interface ProjectDocument {
+  id: string
+  project_id: string
+  original_filename: string
+  description: string | null
+  content_type: string
+  file_size: number
+  sha256: string
+  storage_path: string
+  created_at: string
+}
+
+export interface DocumentContent {
+  content: string
+  content_type: string
+  filename: string
+  size: number
+}
+
 // ── Chat types ──
 
 export interface ChatAttachment {

@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { listDirectory, readFile, getFileInfo } from '@/api/files'
-import type { FileContent, FileInfo } from '@/types'
+import { listDocuments, readDocumentContent } from '@/api/documents'
+import type { FileContent, FileInfo, ProjectDocument } from '@/types'
 
 /** MIME types that indicate text content (even though some start with application/) */
 const TEXT_MIME_PREFIXES = ['text/', 'application/json', 'application/xml', 'application/javascript']
@@ -60,12 +61,17 @@ interface ExplorerState {
   contentLoading: boolean
   infoLoading: boolean
   treeError: string | null
+  documents: ProjectDocument[]
+  documentsLoading: boolean
+  selectedDocumentId: string | null
 }
 
 interface ExplorerActions {
   loadRootDirectory: (projectId: string) => Promise<void>
   loadDirectory: (projectId: string, path: string) => Promise<void>
   selectFile: (projectId: string, node: TreeNode) => Promise<void>
+  loadDocuments: (projectId: string) => Promise<void>
+  selectDocument: (projectId: string, document: ProjectDocument) => Promise<void>
   reset: () => void
 }
 
@@ -78,6 +84,9 @@ const initialState: ExplorerState = {
   contentLoading: false,
   infoLoading: false,
   treeError: null,
+  documents: [],
+  documentsLoading: false,
+  selectedDocumentId: null,
 }
 
 export const useExplorerStore = create<ExplorerState & ExplorerActions>(
@@ -166,6 +175,7 @@ export const useExplorerStore = create<ExplorerState & ExplorerActions>(
         fileInfo: null,
         contentLoading: true,
         infoLoading: true,
+        selectedDocumentId: null,
       })
 
       // Fetch file info first to determine if binary
@@ -192,6 +202,47 @@ export const useExplorerStore = create<ExplorerState & ExplorerActions>(
         }
       } catch {
         if (get().selectedPath === node.id) {
+          set({ contentLoading: false })
+        }
+      }
+    },
+
+    loadDocuments: async (projectId) => {
+      set({ documentsLoading: true })
+      try {
+        const docs = await listDocuments(projectId)
+        set({ documents: docs, documentsLoading: false })
+      } catch {
+        set({ documentsLoading: false })
+      }
+    },
+
+    selectDocument: async (projectId, document) => {
+      set({
+        selectedDocumentId: document.id,
+        selectedPath: null,
+        selectedNode: null,
+        fileContent: null,
+        fileInfo: null,
+        contentLoading: true,
+        infoLoading: false,
+      })
+
+      try {
+        const result = await readDocumentContent(projectId, document.id)
+        if (get().selectedDocumentId === document.id) {
+          set({
+            fileContent: {
+              content: result.content,
+              is_binary: false,
+              size: result.size,
+              truncated: false,
+            },
+            contentLoading: false,
+          })
+        }
+      } catch {
+        if (get().selectedDocumentId === document.id) {
           set({ contentLoading: false })
         }
       }

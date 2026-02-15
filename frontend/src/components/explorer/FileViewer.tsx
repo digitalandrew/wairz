@@ -13,10 +13,81 @@ import type { FunctionInfo } from '@/types'
 import HexViewer from './HexViewer'
 import BinaryInfo from './BinaryInfo'
 
+/** Map document filename extension to Monaco language */
+function getDocumentLanguage(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase()
+  switch (ext) {
+    case 'md':
+      return 'markdown'
+    case 'json':
+      return 'json'
+    case 'xml':
+    case 'html':
+      return 'html'
+    case 'csv':
+    case 'txt':
+    default:
+      return 'plaintext'
+  }
+}
+
 export default function FileViewer() {
   const { projectId } = useParams<{ projectId: string }>()
-  const { selectedNode, selectedPath, fileContent, fileInfo, contentLoading, infoLoading } =
+  const { selectedNode, selectedPath, selectedDocumentId, documents, fileContent, fileInfo, contentLoading, infoLoading } =
     useExplorerStore()
+
+  // Document view mode
+  if (selectedDocumentId) {
+    const doc = documents.find((d) => d.id === selectedDocumentId)
+    const filename = doc?.original_filename ?? 'Document'
+
+    return (
+      <div className="flex h-full flex-col">
+        {/* Document header bar */}
+        <div className="flex items-center gap-3 border-b border-border px-4 py-2">
+          <span className="min-w-0 truncate font-mono text-sm">{filename}</span>
+          <div className="ml-auto flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
+            {doc && (
+              <>
+                <span>{doc.content_type}</span>
+                <span>{formatFileSize(doc.file_size)}</span>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Document content */}
+        {contentLoading ? (
+          <div className="flex flex-1 items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : fileContent ? (
+          <div className="flex-1">
+            <Editor
+              language={getDocumentLanguage(filename)}
+              value={fileContent.content}
+              theme="vs-dark"
+              options={{
+                readOnly: true,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                fontSize: 13,
+                lineNumbers: 'on',
+                wordWrap: 'on',
+                renderLineHighlight: 'none',
+                contextmenu: false,
+                automaticLayout: true,
+              }}
+            />
+          </div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+            Failed to load document content.
+          </div>
+        )}
+      </div>
+    )
+  }
 
   if (!selectedPath) {
     return (

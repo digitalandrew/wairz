@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Tree, type NodeRendererProps } from 'react-arborist'
-import { ChevronRight, Loader2, MessageSquare, Paperclip } from 'lucide-react'
+import { ChevronRight, FileText, Loader2, MessageSquare, Paperclip } from 'lucide-react'
 import { useParams } from 'react-router-dom'
 import {
   useExplorerStore,
@@ -85,6 +85,10 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     loadRootDirectory,
     loadDirectory,
     selectFile,
+    documents,
+    documentsLoading,
+    selectedDocumentId,
+    selectDocument,
   } = useExplorerStore()
   const addAttachment = useChatStore((s) => s.addAttachment)
 
@@ -198,6 +202,14 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     setContextMenu(null)
   }, [contextMenu, addAttachment])
 
+  const handleSelectDocument = useCallback(
+    (doc: import('@/types').ProjectDocument) => {
+      if (!projectId) return
+      selectDocument(projectId, doc)
+    },
+    [projectId, selectDocument],
+  )
+
   if (treeError) {
     return (
       <div className="p-4 text-sm text-destructive">
@@ -206,24 +218,67 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     )
   }
 
+  // Reserve space for documents section when documents exist
+  const docsHeight = documents.length > 0 ? Math.min(documents.length * 28 + 36, 180) : documentsLoading ? 60 : 0
+  const treeHeight = Math.max(height - docsHeight, 100)
+
   return (
     <div ref={containerRef} className="relative flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
-      <Tree<TreeNode>
-        data={treeData}
-        width="100%"
-        height={height}
-        rowHeight={28}
-        indent={16}
-        openByDefault={false}
-        disableDrag
-        disableDrop
-        disableEdit
-        disableMultiSelection
-        onToggle={handleToggle}
-        onActivate={handleActivate}
-      >
-        {Node}
-      </Tree>
+      <div style={{ height: treeHeight }}>
+        <Tree<TreeNode>
+          data={treeData}
+          width="100%"
+          height={treeHeight}
+          rowHeight={28}
+          indent={16}
+          openByDefault={false}
+          disableDrag
+          disableDrop
+          disableEdit
+          disableMultiSelection
+          onToggle={handleToggle}
+          onActivate={handleActivate}
+        >
+          {Node}
+        </Tree>
+      </div>
+
+      {/* Project Documents section */}
+      {(documents.length > 0 || documentsLoading) && (
+        <div className="border-t border-border" style={{ height: docsHeight }}>
+          <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+            <FileText className="h-3.5 w-3.5" />
+            Documents
+          </div>
+          {documentsLoading ? (
+            <div className="flex items-center gap-1.5 px-4 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Loading…
+            </div>
+          ) : (
+            <div className="overflow-auto" style={{ maxHeight: docsHeight - 36 }}>
+              {documents.map((doc) => (
+                <div
+                  key={doc.id}
+                  onClick={() => handleSelectDocument(doc)}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-sm px-2 py-1 text-sm ${
+                    selectedDocumentId === doc.id
+                      ? 'bg-accent text-accent-foreground'
+                      : 'hover:bg-accent/50'
+                  }`}
+                >
+                  <span className="w-3 shrink-0" />
+                  <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{doc.original_filename}</span>
+                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                    {formatFileSize(doc.file_size)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Context menu */}
       {contextMenu && (

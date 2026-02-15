@@ -1,5 +1,6 @@
 from app.ai.tool_registry import ToolRegistry
 from app.ai.tools.binary import register_binary_tools
+from app.ai.tools.documents import register_document_tools
 from app.ai.tools.filesystem import register_filesystem_tools
 from app.ai.tools.reporting import register_reporting_tools
 from app.ai.tools.security import register_security_tools
@@ -14,4 +15,5 @@ def create_tool_registry() -> ToolRegistry:
     register_binary_tools(registry)
     register_security_tools(registry)
     register_reporting_tools(registry)
+    register_document_tools(registry)
     return registry

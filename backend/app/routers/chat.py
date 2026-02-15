@@ -12,6 +12,7 @@ from app.models.firmware import Firmware
 from app.models.project import Project
 from app.schemas.chat import ConversationCreate, ConversationDetailResponse, ConversationResponse
 from app.services.conversation_service import ConversationService
+from app.services.document_service import DocumentService
 from app.services.file_service import FileService
 from app.utils.truncation import truncate_output
 
@@ -105,6 +106,18 @@ async def websocket_chat(
                 await websocket.close(code=4004)
                 return
 
+            # Load project documents for AI context
+            doc_svc = DocumentService(db)
+            docs = await doc_svc.list_by_project(project_id)
+            doc_list = [
+                {
+                    "id": str(doc.id),
+                    "filename": doc.original_filename,
+                    "description": doc.description,
+                }
+                for doc in docs
+            ] if docs else None
+
             # Set up orchestrator
             registry = create_tool_registry()
             orchestrator = AIOrchestrator(registry)
@@ -117,6 +130,7 @@ async def websocket_chat(
                 architecture=firmware.architecture,
                 endianness=firmware.endianness,
                 extracted_path=firmware.extracted_path,
+                documents=doc_list,
             )
 
             messages = list(conversation.messages or [])

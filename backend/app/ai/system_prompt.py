@@ -4,12 +4,13 @@ def build_system_prompt(
     architecture: str | None,
     endianness: str | None,
     extracted_path: str,
+    documents: list[dict] | None = None,
 ) -> str:
     """Build the system prompt for the AI firmware analyst."""
     arch_info = architecture or "unknown"
     endian_info = endianness or "unknown"
 
-    return f"""\
+    prompt = f"""\
 You are Wairz AI, an expert firmware reverse engineer and security analyst.
 You are analyzing firmware for project: {project_name}
 Firmware: {firmware_filename} ({arch_info}, {endian_info})
@@ -45,3 +46,16 @@ Output format:
 You have access to the tools defined in this conversation. Use them freely \
 to investigate. You may make multiple tool calls in sequence to follow \
 a line of investigation."""
+
+    if documents:
+        doc_lines = ["\n\nProject Documents:"]
+        doc_lines.append(
+            "The following supplementary documents have been uploaded to this project. "
+            "Use the read_project_document tool with the document ID to read their contents."
+        )
+        for doc in documents:
+            desc = f" — {doc['description']}" if doc.get("description") else ""
+            doc_lines.append(f"- {doc['filename']}{desc} (ID: {doc['id']})")
+        prompt += "\n".join(doc_lines)
+
+    return prompt
