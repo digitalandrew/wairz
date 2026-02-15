@@ -27,6 +27,8 @@ class FindingService:
             line_number=data.line_number,
             cve_ids=data.cve_ids,
             cwe_ids=data.cwe_ids,
+            source=data.source,
+            component_id=data.component_id,
         )
         self.db.add(finding)
         await self.db.flush()

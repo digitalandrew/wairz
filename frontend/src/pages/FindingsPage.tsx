@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom'
 import { ShieldAlert, Loader2 } from 'lucide-react'
 import { listFindings, updateFinding, deleteFinding } from '@/api/findings'
 import { useChatStore } from '@/stores/chatStore'
-import type { Finding, FindingUpdate, Severity, FindingStatus } from '@/types'
+import type { Finding, FindingUpdate, Severity, FindingStatus, FindingSource } from '@/types'
 import FindingsList from '@/components/findings/FindingsList'
 import FindingDetail from '@/components/findings/FindingDetail'
 import ReportExport from '@/components/findings/ReportExport'
@@ -18,6 +18,7 @@ export default function FindingsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [severityFilter, setSeverityFilter] = useState<Severity | null>(null)
   const [statusFilter, setStatusFilter] = useState<FindingStatus | null>(null)
+  const [sourceFilter, setSourceFilter] = useState<FindingSource | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
 
   const fetchFindings = useCallback(async () => {
@@ -26,6 +27,7 @@ export default function FindingsPage() {
       const params: Record<string, string> = {}
       if (severityFilter) params.severity = severityFilter
       if (statusFilter) params.status = statusFilter
+      if (sourceFilter) params.source = sourceFilter
       const data = await listFindings(projectId, params)
       setFindings(data)
     } catch (err) {
@@ -33,7 +35,7 @@ export default function FindingsPage() {
     } finally {
       setLoading(false)
     }
-  }, [projectId, severityFilter, statusFilter])
+  }, [projectId, severityFilter, statusFilter, sourceFilter])
 
   useEffect(() => {
     fetchFindings()
@@ -97,8 +99,10 @@ export default function FindingsPage() {
             onSelect={handleSelect}
             severityFilter={severityFilter}
             statusFilter={statusFilter}
+            sourceFilter={sourceFilter}
             onSeverityFilter={setSeverityFilter}
             onStatusFilter={setStatusFilter}
+            onSourceFilter={setSourceFilter}
           />
         </div>
       </div>

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     ghidra_path: str = "/opt/ghidra"
     ghidra_scripts_path: str = "/opt/ghidra_scripts"
     ghidra_timeout: int = 120
+    nvd_api_key: str = ""
     log_level: str = "INFO"
 
 

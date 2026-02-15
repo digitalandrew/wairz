@@ -33,6 +33,11 @@ class Finding(Base):
     cve_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     cwe_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     status: Mapped[str] = mapped_column(String(20), default="open", server_default="open")
+    source: Mapped[str] = mapped_column(String(50), default="manual", server_default="manual")
+    component_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sbom_components.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 

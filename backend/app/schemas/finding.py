@@ -30,6 +30,8 @@ class FindingCreate(BaseModel):
     cve_ids: list[str] | None = None
     cwe_ids: list[str] | None = None
     conversation_id: uuid.UUID | None = None
+    source: str = "manual"
+    component_id: uuid.UUID | None = None
 
 
 class FindingUpdate(BaseModel):
@@ -42,6 +44,7 @@ class FindingUpdate(BaseModel):
     cve_ids: list[str] | None = None
     cwe_ids: list[str] | None = None
     status: FindingStatus | None = None
+    source: str | None = None
 
 
 class FindingResponse(BaseModel):
@@ -59,5 +62,7 @@ class FindingResponse(BaseModel):
     cve_ids: list[str] | None
     cwe_ids: list[str] | None
     status: str
+    source: str
+    component_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime

@@ -50,6 +50,11 @@ def register_reporting_tools(registry: ToolRegistry) -> None:
                     "items": {"type": "string"},
                     "description": "Associated CWE identifiers, e.g. ['CWE-798', 'CWE-259'] for hardcoded credentials",
                 },
+                "source": {
+                    "type": "string",
+                    "enum": ["ai_discovered", "manual", "sbom_scan", "fuzzing", "security_review"],
+                    "description": "How this finding was discovered (default: ai_discovered)",
+                },
             },
             "required": ["title", "severity", "description"],
         },
@@ -125,6 +130,7 @@ async def _handle_add_finding(input: dict, context: ToolContext) -> str:
         line_number=input.get("line_number"),
         cve_ids=input.get("cve_ids"),
         cwe_ids=input.get("cwe_ids"),
+        source=input.get("source", "ai_discovered"),
     )
     finding = await svc.create(context.project_id, data)
     await context.db.commit()

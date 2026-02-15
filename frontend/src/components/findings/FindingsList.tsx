@@ -7,10 +7,15 @@ import {
   ShieldX,
   ChevronDown,
   ChevronUp,
+  Package,
+  Bot,
+  User,
+  Search,
+  Bug,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import type { Finding, Severity, FindingStatus } from '@/types'
+import type { Finding, Severity, FindingStatus, FindingSource } from '@/types'
 import { formatDate } from '@/utils/format'
 
 const SEVERITY_CONFIG: Record<Severity, { icon: React.ElementType; className: string; order: number }> = {
@@ -28,14 +33,24 @@ const STATUS_CONFIG: Record<FindingStatus, { label: string; className: string }>
   fixed: { label: 'Fixed', className: 'border-green-500/50 text-green-600 dark:text-green-400' },
 }
 
+const SOURCE_CONFIG: Record<FindingSource, { icon: React.ElementType; label: string; className: string }> = {
+  manual: { icon: User, label: 'Manual', className: 'border-gray-500/50 text-gray-500' },
+  ai_discovered: { icon: Bot, label: 'AI', className: 'border-purple-500/50 text-purple-600 dark:text-purple-400' },
+  sbom_scan: { icon: Package, label: 'SBOM Scan', className: 'border-teal-500/50 text-teal-600 dark:text-teal-400' },
+  fuzzing: { icon: Bug, label: 'Fuzzing', className: 'border-orange-500/50 text-orange-600 dark:text-orange-400' },
+  security_review: { icon: Search, label: 'Review', className: 'border-blue-500/50 text-blue-600 dark:text-blue-400' },
+}
+
 interface FindingsListProps {
   findings: Finding[]
   selectedId: string | null
   onSelect: (finding: Finding) => void
   severityFilter: Severity | null
   statusFilter: FindingStatus | null
+  sourceFilter: FindingSource | null
   onSeverityFilter: (s: Severity | null) => void
   onStatusFilter: (s: FindingStatus | null) => void
+  onSourceFilter: (s: FindingSource | null) => void
 }
 
 type SortField = 'severity' | 'created_at'
@@ -47,8 +62,10 @@ export default function FindingsList({
   onSelect,
   severityFilter,
   statusFilter,
+  sourceFilter,
   onSeverityFilter,
   onStatusFilter,
+  onSourceFilter,
 }: FindingsListProps) {
   const [sortField, setSortField] = useState<SortField>('severity')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
@@ -121,6 +138,28 @@ export default function FindingsList({
             </button>
           )
         })}
+
+        <span className="ml-2 text-xs text-muted-foreground">Source:</span>
+        {(['manual', 'ai_discovered', 'sbom_scan', 'security_review', 'fuzzing'] as FindingSource[]).map((src) => {
+          const config = SOURCE_CONFIG[src]
+          const active = sourceFilter === src
+          const SourceIcon = config.icon
+          return (
+            <button
+              key={src}
+              type="button"
+              onClick={() => onSourceFilter(active ? null : src)}
+              className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium transition-colors ${
+                active
+                  ? config.className + ' border-current'
+                  : 'border-border text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <SourceIcon className="h-3 w-3" />
+              {config.label}
+            </button>
+          )
+        })}
       </div>
 
       {/* Sort controls */}
@@ -182,6 +221,16 @@ export default function FindingsList({
                     <Badge variant="outline" className={`shrink-0 text-[10px] ${statConfig.className}`}>
                       {statConfig.label}
                     </Badge>
+                    {f.source && f.source !== 'manual' && (() => {
+                      const srcConfig = SOURCE_CONFIG[f.source]
+                      const SrcIcon = srcConfig.icon
+                      return (
+                        <Badge variant="outline" className={`shrink-0 text-[10px] ${srcConfig.className}`}>
+                          <SrcIcon className="mr-0.5 h-2.5 w-2.5" />
+                          {srcConfig.label}
+                        </Badge>
+                      )
+                    })()}
                   </div>
                   <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
                     {f.file_path && (

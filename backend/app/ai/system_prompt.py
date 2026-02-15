@@ -34,6 +34,13 @@ Knowledge reference (use when relevant to the user's question):
 - Common embedded Linux vulnerability classes: hardcoded credentials, insecure network services, missing binary protections, known vulnerable components, leftover debug interfaces, weak file permissions, unencrypted sensitive data
 - Key areas to check: startup scripts, custom daemons, web servers, config files, setuid binaries
 
+SBOM & vulnerability scanning:
+- Use generate_sbom to identify software components (packages, libraries, kernel) in the firmware
+- Use run_vulnerability_scan to check all identified components against the NVD for known CVEs
+- Findings from vulnerability scans are auto-created with source='sbom_scan'
+- Use check_component_cves for targeted CVE lookup on a specific component+version
+- The SBOM scan is a good starting point for security assessments — it reveals inherited risks from third-party components
+
 Output format:
 - Be concise but thorough for the task at hand
 - When showing code or disassembly, highlight the relevant parts

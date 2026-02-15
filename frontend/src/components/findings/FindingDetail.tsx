@@ -12,11 +12,16 @@ import {
   Check,
   X,
   Trash2,
+  Package,
+  Bot,
+  User,
+  Search,
+  Bug,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import type { Finding, FindingUpdate, FindingStatus, Severity } from '@/types'
+import type { Finding, FindingUpdate, FindingStatus, Severity, FindingSource } from '@/types'
 import { formatDate } from '@/utils/format'
 import { getCweDescription, getCweMitreUrl } from '@/utils/cwe'
 
@@ -34,6 +39,14 @@ const STATUS_OPTIONS: { value: FindingStatus; label: string }[] = [
   { value: 'false_positive', label: 'False Positive' },
   { value: 'fixed', label: 'Fixed' },
 ]
+
+const SOURCE_CONFIG: Record<FindingSource, { icon: React.ElementType; label: string; className: string }> = {
+  manual: { icon: User, label: 'Manual', className: 'border-gray-500/50 text-gray-500' },
+  ai_discovered: { icon: Bot, label: 'AI Discovered', className: 'border-purple-500/50 text-purple-600 dark:text-purple-400' },
+  sbom_scan: { icon: Package, label: 'Inherited Vulnerability', className: 'border-teal-500/50 text-teal-600 dark:text-teal-400' },
+  fuzzing: { icon: Bug, label: 'Fuzzing', className: 'border-orange-500/50 text-orange-600 dark:text-orange-400' },
+  security_review: { icon: Search, label: 'Security Review', className: 'border-blue-500/50 text-blue-600 dark:text-blue-400' },
+}
 
 interface FindingDetailProps {
   finding: Finding
@@ -86,6 +99,16 @@ export default function FindingDetail({ finding, onUpdate, onDelete }: FindingDe
           <h2 className="text-lg font-semibold leading-tight">{finding.title}</h2>
           <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
             <Badge className={sevConfig.className}>{sevConfig.label}</Badge>
+            {finding.source && (() => {
+              const srcConfig = SOURCE_CONFIG[finding.source]
+              const SrcIcon = srcConfig.icon
+              return (
+                <Badge variant="outline" className={`text-xs ${srcConfig.className}`}>
+                  <SrcIcon className="mr-1 h-3 w-3" />
+                  {srcConfig.label}
+                </Badge>
+              )
+            })()}
             <span>{formatDate(finding.created_at)}</span>
           </div>
         </div>

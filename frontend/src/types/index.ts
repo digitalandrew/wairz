@@ -151,6 +151,7 @@ export const DEFAULT_MODEL = 'claude-sonnet-4-20250514'
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
 export type FindingStatus = 'open' | 'confirmed' | 'false_positive' | 'fixed'
+export type FindingSource = 'manual' | 'ai_discovered' | 'sbom_scan' | 'fuzzing' | 'security_review'
 
 export interface Finding {
   id: string
@@ -165,6 +166,8 @@ export interface Finding {
   cve_ids: string[] | null
   cwe_ids: string[] | null
   status: FindingStatus
+  source: FindingSource
+  component_id: string | null
   created_at: string
   updated_at: string
 }
@@ -179,6 +182,7 @@ export interface FindingCreate {
   cve_ids?: string[]
   cwe_ids?: string[]
   conversation_id?: string
+  source?: FindingSource
 }
 
 export interface FindingUpdate {
@@ -191,6 +195,66 @@ export interface FindingUpdate {
   cve_ids?: string[]
   cwe_ids?: string[]
   status?: FindingStatus
+  source?: FindingSource
+}
+
+// ── SBOM types ──
+
+export type DetectionSource = 'package_manager' | 'binary_strings' | 'library_soname' | 'kernel_modules' | 'config_file'
+export type DetectionConfidence = 'high' | 'medium' | 'low'
+
+export interface SbomComponent {
+  id: string
+  firmware_id: string
+  name: string
+  version: string | null
+  type: string
+  cpe: string | null
+  purl: string | null
+  supplier: string | null
+  detection_source: DetectionSource
+  detection_confidence: DetectionConfidence
+  file_paths: string[] | null
+  metadata: Record<string, unknown>
+  vulnerability_count: number
+  created_at: string
+}
+
+export interface SbomVulnerability {
+  id: string
+  component_id: string
+  cve_id: string
+  cvss_score: number | null
+  cvss_vector: string | null
+  severity: Severity
+  description: string | null
+  published_date: string | null
+  finding_id: string | null
+  component_name: string | null
+  component_version: string | null
+}
+
+export interface SbomGenerateResponse {
+  components: SbomComponent[]
+  total: number
+  cached: boolean
+}
+
+export interface SbomSummary {
+  total_components: number
+  components_by_type: Record<string, number>
+  components_with_vulns: number
+  total_vulnerabilities: number
+  vulns_by_severity: Record<string, number>
+  scan_date: string | null
+}
+
+export interface VulnerabilityScanResult {
+  status: string
+  total_components_scanned: number
+  total_vulnerabilities_found: number
+  findings_created: number
+  vulns_by_severity: Record<string, number>
 }
 
 // ── Document types ──
