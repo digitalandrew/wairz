@@ -64,6 +64,30 @@ export async function readDocumentContent(
   return data
 }
 
+export async function createNote(
+  projectId: string,
+  title: string,
+  content?: string,
+): Promise<ProjectDocument> {
+  const { data } = await apiClient.post<ProjectDocument>(
+    `/projects/${projectId}/documents/notes`,
+    { title, content: content ?? '' },
+  )
+  return data
+}
+
+export async function updateDocumentContent(
+  projectId: string,
+  documentId: string,
+  content: string,
+): Promise<ProjectDocument> {
+  const { data } = await apiClient.put<ProjectDocument>(
+    `/projects/${projectId}/documents/${documentId}/content`,
+    { content },
+  )
+  return data
+}
+
 export function getDocumentDownloadUrl(projectId: string, documentId: string): string {
   return `/api/v1/projects/${projectId}/documents/${documentId}/download`
 }

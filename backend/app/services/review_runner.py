@@ -20,6 +20,7 @@ from app.models.conversation import Conversation
 from app.models.firmware import Firmware
 from app.models.project import Project
 from app.models.security_review import ReviewAgent, SecurityReview
+from app.services.document_service import DocumentService
 from app.services.review_service import ReviewService
 
 logger = logging.getLogger(__name__)
@@ -340,6 +341,16 @@ class ReviewRunner:
             logger.error("No unpacked firmware for project %s", self.project_id)
             return None
 
+        # Read WAIRZ.md content for project instructions
+        doc_svc = DocumentService(db)
+        docs = await doc_svc.list_by_project(self.project_id)
+        wairz_md_content = None
+        if docs:
+            for doc in docs:
+                if doc.original_filename.upper() == "WAIRZ.MD":
+                    wairz_md_content = doc_svc.read_text_content(doc)
+                    break
+
         return ProjectContext(
             project_id=project.id,
             firmware_id=firmware.id,
@@ -348,6 +359,7 @@ class ReviewRunner:
             architecture=firmware.architecture,
             endianness=firmware.endianness,
             extracted_path=firmware.extracted_path,
+            wairz_md_content=wairz_md_content,
         )
 
 

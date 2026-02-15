@@ -33,6 +33,7 @@ class ProjectContext:
     endianness: str | None
     extracted_path: str
     documents: list[dict] | None = None
+    wairz_md_content: str | None = None
 
 
 class AIOrchestrator:
@@ -72,6 +73,7 @@ class AIOrchestrator:
                 endianness=project_context.endianness,
                 extracted_path=project_context.extracted_path,
                 documents=project_context.documents,
+                wairz_md_content=project_context.wairz_md_content,
             )
 
         tool_context = ToolContext(

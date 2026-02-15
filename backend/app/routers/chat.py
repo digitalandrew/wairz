@@ -109,14 +109,23 @@ async def websocket_chat(
             # Load project documents for AI context
             doc_svc = DocumentService(db)
             docs = await doc_svc.list_by_project(project_id)
-            doc_list = [
-                {
-                    "id": str(doc.id),
-                    "filename": doc.original_filename,
-                    "description": doc.description,
-                }
-                for doc in docs
-            ] if docs else None
+
+            # Read WAIRZ.md content to inject directly into the system prompt
+            wairz_md_content = None
+            doc_list = None
+            if docs:
+                for doc in docs:
+                    if doc.original_filename.upper() == "WAIRZ.MD":
+                        wairz_md_content = doc_svc.read_text_content(doc)
+                        break
+                doc_list = [
+                    {
+                        "id": str(doc.id),
+                        "filename": doc.original_filename,
+                        "description": doc.description,
+                    }
+                    for doc in docs
+                ]
 
             # Set up orchestrator
             registry = create_tool_registry()
@@ -131,6 +140,7 @@ async def websocket_chat(
                 endianness=firmware.endianness,
                 extracted_path=firmware.extracted_path,
                 documents=doc_list,
+                wairz_md_content=wairz_md_content,
             )
 
             messages = list(conversation.messages or [])

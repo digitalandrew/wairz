@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { listDirectory, readFile, getFileInfo } from '@/api/files'
-import { listDocuments, readDocumentContent } from '@/api/documents'
+import { listDocuments, readDocumentContent, createNote as apiCreateNote, updateDocumentContent } from '@/api/documents'
 import type { FileContent, FileInfo, ProjectDocument } from '@/types'
 
 /** MIME types that indicate text content (even though some start with application/) */
@@ -64,6 +64,8 @@ interface ExplorerState {
   documents: ProjectDocument[]
   documentsLoading: boolean
   selectedDocumentId: string | null
+  documentDirty: boolean
+  documentContent: string | null
 }
 
 interface ExplorerActions {
@@ -72,6 +74,9 @@ interface ExplorerActions {
   selectFile: (projectId: string, node: TreeNode) => Promise<void>
   loadDocuments: (projectId: string) => Promise<void>
   selectDocument: (projectId: string, document: ProjectDocument) => Promise<void>
+  setDocumentContent: (content: string) => void
+  saveDocument: (projectId: string) => Promise<void>
+  createNote: (projectId: string, title: string) => Promise<void>
   reset: () => void
 }
 
@@ -87,6 +92,8 @@ const initialState: ExplorerState = {
   documents: [],
   documentsLoading: false,
   selectedDocumentId: null,
+  documentDirty: false,
+  documentContent: null,
 }
 
 export const useExplorerStore = create<ExplorerState & ExplorerActions>(
@@ -176,6 +183,8 @@ export const useExplorerStore = create<ExplorerState & ExplorerActions>(
         contentLoading: true,
         infoLoading: true,
         selectedDocumentId: null,
+        documentDirty: false,
+        documentContent: null,
       })
 
       // Fetch file info first to determine if binary
@@ -226,6 +235,8 @@ export const useExplorerStore = create<ExplorerState & ExplorerActions>(
         fileInfo: null,
         contentLoading: true,
         infoLoading: false,
+        documentDirty: false,
+        documentContent: null,
       })
 
       try {
@@ -245,6 +256,46 @@ export const useExplorerStore = create<ExplorerState & ExplorerActions>(
         if (get().selectedDocumentId === document.id) {
           set({ contentLoading: false })
         }
+      }
+    },
+
+    setDocumentContent: (content) => {
+      set({ documentContent: content, documentDirty: true })
+    },
+
+    saveDocument: async (projectId) => {
+      const { selectedDocumentId, documentContent } = get()
+      if (!selectedDocumentId || documentContent === null) return
+      try {
+        const updated = await updateDocumentContent(projectId, selectedDocumentId, documentContent)
+        set({
+          documentDirty: false,
+          fileContent: {
+            content: documentContent,
+            is_binary: false,
+            size: updated.file_size,
+            truncated: false,
+          },
+          // Update the document in the documents list with new metadata
+          documents: get().documents.map((d) =>
+            d.id === selectedDocumentId ? { ...d, file_size: updated.file_size, sha256: updated.sha256 } : d,
+          ),
+        })
+      } catch {
+        // Leave dirty state so user can retry
+      }
+    },
+
+    createNote: async (projectId, title) => {
+      try {
+        const doc = await apiCreateNote(projectId, title)
+        // Reload documents list then select the new note
+        const docs = await listDocuments(projectId)
+        set({ documents: docs })
+        // Select the new document
+        get().selectDocument(projectId, doc)
+      } catch {
+        // Silently fail — could add error state later
       }
     },
 

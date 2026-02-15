@@ -5,6 +5,7 @@ def build_system_prompt(
     endianness: str | None,
     extracted_path: str,
     documents: list[dict] | None = None,
+    wairz_md_content: str | None = None,
 ) -> str:
     """Build the system prompt for the AI firmware analyst."""
     arch_info = architecture or "unknown"
@@ -42,15 +43,32 @@ Output format:
 You have access to the tools defined in this conversation. Use them \
 to investigate as needed for the user's request."""
 
+    # Inject WAIRZ.md content directly into the system prompt
+    if wairz_md_content:
+        prompt += f"""
+
+--- Project Instructions (WAIRZ.md) ---
+The project owner has provided the following custom instructions. \
+Follow these instructions as they apply to your analysis:
+
+{wairz_md_content}
+--- End Project Instructions ---"""
+
     if documents:
-        doc_lines = ["\n\nProject Documents:"]
-        doc_lines.append(
-            "The following supplementary documents have been uploaded to this project. "
-            "Use the read_project_document tool with the document ID to read their contents."
-        )
-        for doc in documents:
-            desc = f" — {doc['description']}" if doc.get("description") else ""
-            doc_lines.append(f"- {doc['filename']}{desc} (ID: {doc['id']})")
-        prompt += "\n".join(doc_lines)
+        # Filter out WAIRZ.md from the document list (already injected above)
+        other_docs = [
+            doc for doc in documents
+            if doc.get("filename", "").upper() != "WAIRZ.MD"
+        ]
+        if other_docs:
+            doc_lines = ["\n\nProject Documents:"]
+            doc_lines.append(
+                "The following supplementary documents have been uploaded to this project. "
+                "Use the read_project_document tool with the document ID to read their contents."
+            )
+            for doc in other_docs:
+                desc = f" — {doc['description']}" if doc.get("description") else ""
+                doc_lines.append(f"- {doc['filename']}{desc} (ID: {doc['id']})")
+            prompt += "\n".join(doc_lines)
 
     return prompt

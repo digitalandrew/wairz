@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Tree, type NodeRendererProps } from 'react-arborist'
-import { ChevronRight, FileText, Loader2, MessageSquare, Paperclip } from 'lucide-react'
+import { Tree, TreeApi, type NodeRendererProps } from 'react-arborist'
+import { ChevronRight, FileText, Loader2, MessageSquare, Paperclip, Plus, Check, X } from 'lucide-react'
 import { useParams } from 'react-router-dom'
 import {
   useExplorerStore,
@@ -89,11 +89,17 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     documentsLoading,
     selectedDocumentId,
     selectDocument,
+    createNote,
   } = useExplorerStore()
   const addAttachment = useChatStore((s) => s.addAttachment)
+  const [showNewNote, setShowNewNote] = useState(false)
+  const [newNoteTitle, setNewNoteTitle] = useState('')
+  const newNoteInputRef = useRef<HTMLInputElement>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
+  const treeRef = useRef<TreeApi<TreeNode>>(null)
   const [height, setHeight] = useState(400)
+  const [visibleCount, setVisibleCount] = useState(0)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
 
   // Measure container height
@@ -113,6 +119,14 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
   useEffect(() => {
     if (projectId) loadRootDirectory(projectId)
   }, [projectId, loadRootDirectory])
+
+  // Update visible node count for dynamic tree height
+  useEffect(() => {
+    setTimeout(() => {
+      const count = treeRef.current?.visibleNodes?.length ?? 0
+      setVisibleCount((prev) => (prev !== count ? count : prev))
+    }, 0)
+  }, [treeData])
 
   // Close context menu on click outside
   useEffect(() => {
@@ -142,6 +156,11 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
       ) {
         loadDirectory(projectId, id)
       }
+      // Update visible count after toggle
+      setTimeout(() => {
+        const count = treeRef.current?.visibleNodes?.length ?? 0
+        setVisibleCount((prev) => (prev !== count ? count : prev))
+      }, 0)
     },
     [projectId, treeData, loadDirectory],
   )
@@ -202,6 +221,21 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     setContextMenu(null)
   }, [contextMenu, addAttachment])
 
+  // Focus new note input when shown
+  useEffect(() => {
+    if (showNewNote) {
+      newNoteInputRef.current?.focus()
+    }
+  }, [showNewNote])
+
+  const handleCreateNote = useCallback(() => {
+    const title = newNoteTitle.trim()
+    if (!title || !projectId) return
+    createNote(projectId, title)
+    setNewNoteTitle('')
+    setShowNewNote(false)
+  }, [projectId, newNoteTitle, createNote])
+
   const handleSelectDocument = useCallback(
     (doc: import('@/types').ProjectDocument) => {
       if (!projectId) return
@@ -218,14 +252,20 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     )
   }
 
-  // Reserve space for documents section when documents exist
-  const docsHeight = documents.length > 0 ? Math.min(documents.length * 28 + 36, 180) : documentsLoading ? 60 : 0
-  const treeHeight = Math.max(height - docsHeight, 100)
+  // Size tree to its content, capped at available space
+  const newNoteRowHeight = showNewNote ? 32 : 0
+  const docsHeight = documents.length > 0 || showNewNote || documentsLoading
+    ? Math.min(documents.length * 28 + 36 + newNoteRowHeight, 220)
+    : 36
+  const maxTreeHeight = Math.max(height - docsHeight, 100)
+  const contentHeight = visibleCount * 28
+  const treeHeight = visibleCount > 0 ? Math.min(contentHeight, maxTreeHeight) : maxTreeHeight
 
   return (
     <div ref={containerRef} className="relative flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
       <div style={{ height: treeHeight }}>
         <Tree<TreeNode>
+          ref={treeRef}
           data={treeData}
           width="100%"
           height={treeHeight}
@@ -244,12 +284,47 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
       </div>
 
       {/* Project Documents section */}
-      {(documents.length > 0 || documentsLoading) && (
-        <div className="border-t border-border" style={{ height: docsHeight }}>
+      <div className="border-t border-border">
           <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <FileText className="h-3.5 w-3.5" />
             Documents
+            <button
+              onClick={() => { setShowNewNote(true); setNewNoteTitle('') }}
+              className="ml-auto rounded p-0.5 hover:bg-accent hover:text-accent-foreground"
+              title="New note"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
           </div>
+          {showNewNote && (
+            <div className="flex items-center gap-1 px-2 py-1">
+              <input
+                ref={newNoteInputRef}
+                type="text"
+                placeholder="Note title…"
+                value={newNoteTitle}
+                onChange={(e) => setNewNoteTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleCreateNote()
+                  if (e.key === 'Escape') { setShowNewNote(false); setNewNoteTitle('') }
+                }}
+                className="min-w-0 flex-1 rounded border border-border bg-background px-1.5 py-0.5 text-sm outline-none focus:border-ring"
+              />
+              <button
+                onClick={handleCreateNote}
+                disabled={!newNoteTitle.trim()}
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
+              >
+                <Check className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => { setShowNewNote(false); setNewNoteTitle('') }}
+                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
           {documentsLoading ? (
             <div className="flex items-center gap-1.5 px-4 text-xs text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -277,8 +352,7 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
               ))}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
       {/* Context menu */}
       {contextMenu && (

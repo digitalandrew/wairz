@@ -29,3 +29,12 @@ class DocumentResponse(BaseModel):
 
 class DocumentUpdate(BaseModel):
     description: str | None = None
+
+
+class NoteCreate(BaseModel):
+    title: str
+    content: str = ""
+
+
+class DocumentContentUpdate(BaseModel):
+    content: str

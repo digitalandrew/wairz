@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import { Loader2, FileSearch, AlertTriangle, Search } from 'lucide-react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { Loader2, FileSearch, AlertTriangle, Search, Save } from 'lucide-react'
 import Editor from '@monaco-editor/react'
 import { useParams } from 'react-router-dom'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -31,27 +31,61 @@ function getDocumentLanguage(filename: string): string {
   }
 }
 
+const EDITABLE_EXTENSIONS = new Set(['.md', '.txt', '.json', '.xml', '.html', '.csv'])
+
+function isDocumentEditable(filename: string): boolean {
+  const dot = filename.lastIndexOf('.')
+  if (dot === -1) return false
+  return EDITABLE_EXTENSIONS.has(filename.slice(dot).toLowerCase())
+}
+
 export default function FileViewer() {
   const { projectId } = useParams<{ projectId: string }>()
-  const { selectedNode, selectedPath, selectedDocumentId, documents, fileContent, fileInfo, contentLoading, infoLoading } =
-    useExplorerStore()
+  const {
+    selectedNode, selectedPath, selectedDocumentId, documents,
+    fileContent, fileInfo, contentLoading, infoLoading,
+    documentDirty, documentContent, setDocumentContent, saveDocument,
+  } = useExplorerStore()
+
+  const saveRef = useRef<(() => void) | null>(null)
 
   // Document view mode
   if (selectedDocumentId) {
     const doc = documents.find((d) => d.id === selectedDocumentId)
     const filename = doc?.original_filename ?? 'Document'
+    const editable = isDocumentEditable(filename)
+    const displayContent = documentContent !== null ? documentContent : (fileContent?.content ?? '')
+
+    // Keep saveRef current for Ctrl+S keybinding
+    saveRef.current = () => {
+      if (projectId && documentDirty) saveDocument(projectId)
+    }
 
     return (
       <div className="flex h-full flex-col">
         {/* Document header bar */}
         <div className="flex items-center gap-3 border-b border-border px-4 py-2">
           <span className="min-w-0 truncate font-mono text-sm">{filename}</span>
+          {documentDirty && (
+            <span className="h-2 w-2 shrink-0 rounded-full bg-blue-400" title="Unsaved changes" />
+          )}
           <div className="ml-auto flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
             {doc && (
               <>
                 <span>{doc.content_type}</span>
                 <span>{formatFileSize(doc.file_size)}</span>
               </>
+            )}
+            {editable && (
+              <button
+                onClick={() => projectId && saveDocument(projectId)}
+                disabled={!documentDirty}
+                className="flex items-center gap-1 rounded px-2 py-1 text-xs hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
+                title="Save (Ctrl+S)"
+              >
+                <Save className="h-3.5 w-3.5" />
+                Save
+              </button>
             )}
           </div>
         </div>
@@ -65,16 +99,31 @@ export default function FileViewer() {
           <div className="flex-1">
             <Editor
               language={getDocumentLanguage(filename)}
-              value={fileContent.content}
+              value={displayContent}
               theme="vs-dark"
+              onChange={(value) => {
+                if (editable && value !== undefined) {
+                  setDocumentContent(value)
+                }
+              }}
+              onMount={(editor, monaco) => {
+                if (editable) {
+                  editor.addAction({
+                    id: 'save-document',
+                    label: 'Save Document',
+                    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+                    run: () => { saveRef.current?.() },
+                  })
+                }
+              }}
               options={{
-                readOnly: true,
+                readOnly: !editable,
                 minimap: { enabled: false },
                 scrollBeyondLastLine: false,
                 fontSize: 13,
                 lineNumbers: 'on',
                 wordWrap: 'on',
-                renderLineHighlight: 'none',
+                renderLineHighlight: editable ? 'line' : 'none',
                 contextmenu: false,
                 automaticLayout: true,
               }}

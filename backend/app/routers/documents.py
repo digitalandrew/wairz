@@ -10,8 +10,10 @@ from app.database import get_db
 from app.models.project import Project
 from app.schemas.document import (
     ALLOWED_EXTENSIONS,
+    DocumentContentUpdate,
     DocumentResponse,
     DocumentUpdate,
+    NoteCreate,
 )
 from app.services.document_service import DocumentService
 
@@ -52,6 +54,48 @@ async def upload_document(
         document = await svc.upload(project_id, file, description)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    return document
+
+
+EDITABLE_EXTENSIONS = {".md", ".txt", ".json", ".xml", ".html", ".csv"}
+
+
+@router.post("/notes", response_model=DocumentResponse, status_code=201)
+async def create_note(
+    project_id: uuid.UUID,
+    body: NoteCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    await _get_project_or_404(project_id, db)
+    svc = DocumentService(db)
+    try:
+        document = await svc.create_note(project_id, body.title, body.content)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return document
+
+
+@router.put("/{document_id}/content", response_model=DocumentResponse)
+async def update_document_content(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    body: DocumentContentUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    await _get_project_or_404(project_id, db)
+    svc = DocumentService(db)
+    existing = await svc.get(document_id)
+    if not existing or existing.project_id != project_id:
+        raise HTTPException(404, "Document not found")
+
+    ext = os.path.splitext(existing.original_filename)[1].lower()
+    if ext not in EDITABLE_EXTENSIONS:
+        raise HTTPException(
+            400,
+            f"Cannot edit documents with extension '{ext}'. Editable types: {', '.join(sorted(EDITABLE_EXTENSIONS))}",
+        )
+
+    document = await svc.update_content(document_id, body.content)
     return document
 
 
