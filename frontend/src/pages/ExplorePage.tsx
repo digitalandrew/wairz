@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { FolderTree } from 'lucide-react'
+import { FolderTree, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { useExplorerStore } from '@/stores/explorerStore'
 import { useChatStore } from '@/stores/chatStore'
 import FileTree from '@/components/explorer/FileTree'
@@ -13,6 +13,7 @@ export default function ExplorePage() {
   const loadDocuments = useExplorerStore((s) => s.loadDocuments)
   const resetChat = useChatStore((s) => s.reset)
   const [chatOpen, setChatOpen] = useState(false)
+  const [treeOpen, setTreeOpen] = useState(true)
 
   useEffect(() => {
     if (projectId) {
@@ -31,16 +32,34 @@ export default function ExplorePage() {
   return (
     <div className="-m-6 flex h-[calc(100vh-3.5rem)]">
       {/* Left panel: file tree */}
-      <div className="flex w-72 shrink-0 flex-col border-r border-border">
-        <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-          <FolderTree className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium">Files</span>
+      {treeOpen && (
+        <div className="flex w-72 shrink-0 flex-col border-r border-border">
+          <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+            <FolderTree className="h-4 w-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Files</span>
+            <button
+              onClick={() => setTreeOpen(false)}
+              className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              title="Collapse panel"
+            >
+              <PanelLeftClose className="h-4 w-4" />
+            </button>
+          </div>
+          <FileTree onRequestChat={handleRequestChat} />
         </div>
-        <FileTree onRequestChat={handleRequestChat} />
-      </div>
+      )}
 
       {/* Center panel: file viewer */}
       <div className="relative flex min-w-0 flex-1 flex-col">
+        {!treeOpen && (
+          <button
+            onClick={() => setTreeOpen(true)}
+            className="absolute left-2 top-2 z-10 rounded border border-border bg-background p-1 text-muted-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
+            title="Show file tree"
+          >
+            <PanelLeftOpen className="h-4 w-4" />
+          </button>
+        )}
         <FileViewer />
         {!chatOpen && (
           <ChatPanel isOpen={false} onToggle={() => setChatOpen(true)} />

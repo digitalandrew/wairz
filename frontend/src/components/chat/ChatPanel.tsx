@@ -135,7 +135,7 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         variant="outline"
         size="sm"
         onClick={onToggle}
-        className="absolute right-4 top-2 z-10"
+        className="absolute bottom-4 right-4 z-10"
       >
         <MessageSquare className="h-4 w-4" />
         <span>AI Chat</span>
