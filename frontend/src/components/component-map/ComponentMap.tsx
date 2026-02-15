@@ -18,6 +18,8 @@ import { MessageSquare, ExternalLink } from 'lucide-react'
 import { useChatStore } from '@/stores/chatStore'
 import type {
   ComponentGraph,
+  ComponentNode as CNode,
+  ComponentEdge as CEdge,
   ComponentNodeType,
   ComponentEdgeType,
 } from '@/types'
@@ -50,6 +52,90 @@ const edgeTypeLabels: Record<ComponentEdgeType, string> = {
 
 const ALL_TYPES = new Set<ComponentNodeType>(['binary', 'library', 'script', 'config', 'init_script'])
 
+const CLUSTER_THRESHOLD = 200
+const MIN_CLUSTER_SIZE = 3
+
+// ── Clustering ─────────────────────────────────────────────────────────
+
+interface ClusterInfo {
+  dir: string
+  members: string[]
+}
+
+function clusterGraph(
+  nodes: CNode[],
+  edges: CEdge[],
+  expandedClusters: Set<string>,
+): { nodes: CNode[]; edges: CEdge[]; clusters: Map<string, ClusterInfo> } {
+  // Group nodes by parent directory
+  const dirGroups = new Map<string, CNode[]>()
+  for (const node of nodes) {
+    const lastSlash = node.id.lastIndexOf('/')
+    const dir = lastSlash > 0 ? node.id.substring(0, lastSlash) : '/'
+    if (!dirGroups.has(dir)) dirGroups.set(dir, [])
+    dirGroups.get(dir)!.push(node)
+  }
+
+  const resultNodes: CNode[] = []
+  const clusterMembership = new Map<string, string>() // nodeId -> clusterId
+  const clusters = new Map<string, ClusterInfo>()
+
+  for (const [dir, members] of dirGroups) {
+    if (members.length >= MIN_CLUSTER_SIZE && !expandedClusters.has(dir)) {
+      const clusterId = `__cluster__:${dir}`
+      const dirName = dir.split('/').filter(Boolean).pop() ?? dir
+
+      // Find the dominant type for visual styling
+      const typeCounts = new Map<ComponentNodeType, number>()
+      for (const m of members) {
+        typeCounts.set(m.type, (typeCounts.get(m.type) ?? 0) + 1)
+      }
+      let dominantType: ComponentNodeType = 'binary'
+      let maxCount = 0
+      for (const [t, c] of typeCounts) {
+        if (c > maxCount) { dominantType = t; maxCount = c }
+      }
+
+      resultNodes.push({
+        id: clusterId,
+        label: `${dirName}/ (${members.length})`,
+        type: dominantType,
+        path: dir,
+        size: members.reduce((s, n) => s + n.size, 0),
+        metadata: { isCluster: true, count: members.length },
+      })
+
+      clusters.set(clusterId, {
+        dir,
+        members: members.map((m) => m.id),
+      })
+
+      for (const m of members) {
+        clusterMembership.set(m.id, clusterId)
+      }
+    } else {
+      resultNodes.push(...members)
+    }
+  }
+
+  // Remap and deduplicate edges
+  const seen = new Set<string>()
+  const remappedEdges: CEdge[] = []
+  for (const e of edges) {
+    const source = clusterMembership.get(e.source) ?? e.source
+    const target = clusterMembership.get(e.target) ?? e.target
+    if (source === target) continue // skip self-loops from clustering
+    const key = `${source}-${target}-${e.type}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    remappedEdges.push({ ...e, source, target })
+  }
+
+  return { nodes: resultNodes, edges: remappedEdges, clusters }
+}
+
+// ── Layout ─────────────────────────────────────────────────────────────
+
 function getLayoutedElements(
   nodes: Node<ComponentNodeData>[],
   edges: Edge[],
@@ -77,6 +163,8 @@ function getLayoutedElements(
 
   return { nodes: layoutedNodes, edges }
 }
+
+// ── Main component ─────────────────────────────────────────────────────
 
 interface SelectedEdge {
   edgeType: ComponentEdgeType
@@ -112,6 +200,10 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
   const [selectedEdge, setSelectedEdge] = useState<SelectedEdge | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
 
+  // Clustering state
+  const [clusteringEnabled, setClusteringEnabled] = useState(graph.nodes.length >= CLUSTER_THRESHOLD)
+  const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set())
+
   // Close context menu on any click
   useEffect(() => {
     if (!contextMenu) return
@@ -120,74 +212,78 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
     return () => window.removeEventListener('click', close)
   }, [contextMenu])
 
+  // Apply clustering if enabled and graph is large
+  const { nodes: processedNodes, edges: processedEdges, clusters } = useMemo(() => {
+    // First filter by visible types
+    const filteredNodes = graph.nodes.filter((n: CNode) => visibleTypes.has(n.type))
+    const filteredNodeIds = new Set(filteredNodes.map((n: CNode) => n.id))
+    const filteredEdges = graph.edges.filter(
+      (e: CEdge) => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target),
+    )
+
+    if (clusteringEnabled && filteredNodes.length >= CLUSTER_THRESHOLD) {
+      return clusterGraph(filteredNodes, filteredEdges, expandedClusters)
+    }
+    return { nodes: filteredNodes, edges: filteredEdges, clusters: new Map<string, ClusterInfo>() }
+  }, [graph.nodes, graph.edges, visibleTypes, clusteringEnabled, expandedClusters])
+
   // Build a lookup for edge details keyed by reactflow edge id
   const edgeDetailsMap = useMemo(() => {
     const map = new Map<string, { type: ComponentEdgeType; details: Record<string, unknown>; source: string; target: string }>()
-    graph.edges.forEach((e) => {
+    processedEdges.forEach((e) => {
       const id = `${e.source}-${e.target}-${e.type}`
       map.set(id, { type: e.type as ComponentEdgeType, details: e.details, source: e.source, target: e.target })
     })
     return map
-  }, [graph.edges])
+  }, [processedEdges])
 
   // Determine which node IDs match the current search
   const matchedNodeIds = useMemo(() => {
     if (!searchQuery.trim()) return null
     const q = searchQuery.toLowerCase()
     return new Set(
-      graph.nodes
+      processedNodes
         .filter((n) => n.label.toLowerCase().includes(q) || n.path.toLowerCase().includes(q))
         .map((n) => n.id)
     )
-  }, [searchQuery, graph.nodes])
-
-  // Filter nodes by visible types
-  const filteredNodeIds = useMemo(() => {
-    return new Set(
-      graph.nodes.filter((n) => visibleTypes.has(n.type)).map((n) => n.id)
-    )
-  }, [graph.nodes, visibleTypes])
+  }, [searchQuery, processedNodes])
 
   // Build ReactFlow nodes
   const initialNodes: Node<ComponentNodeData>[] = useMemo(() => {
-    return graph.nodes
-      .filter((n) => filteredNodeIds.has(n.id))
-      .map((n) => ({
-        id: n.id,
-        type: 'component',
-        position: { x: 0, y: 0 },
-        data: {
-          label: n.label,
-          nodeType: n.type,
-          path: n.path,
-          size: n.size,
-          metadata: n.metadata,
-        },
-        style: matchedNodeIds && !matchedNodeIds.has(n.id)
-          ? { opacity: 0.25 }
-          : undefined,
-      }))
-  }, [graph.nodes, filteredNodeIds, matchedNodeIds])
+    return processedNodes.map((n) => ({
+      id: n.id,
+      type: 'component',
+      position: { x: 0, y: 0 },
+      data: {
+        label: n.label,
+        nodeType: n.type,
+        path: n.path,
+        size: n.size,
+        metadata: n.metadata,
+      },
+      style: matchedNodeIds && !matchedNodeIds.has(n.id)
+        ? { opacity: 0.25 }
+        : undefined,
+    }))
+  }, [processedNodes, matchedNodeIds])
 
   // Build ReactFlow edges
   const initialEdges: Edge[] = useMemo(() => {
-    return graph.edges
-      .filter((e) => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target))
-      .map((e) => {
-        const style = edgeStyles[e.type as ComponentEdgeType] ?? edgeStyles.links_library
-        const dimmed = matchedNodeIds && (!matchedNodeIds.has(e.source) && !matchedNodeIds.has(e.target))
-        return {
-          id: `${e.source}-${e.target}-${e.type}`,
-          source: e.source,
-          target: e.target,
-          animated: e.type === 'starts_service',
-          style: {
-            ...style,
-            opacity: dimmed ? 0.1 : undefined,
-          },
-        }
-      })
-  }, [graph.edges, filteredNodeIds, matchedNodeIds])
+    return processedEdges.map((e) => {
+      const style = edgeStyles[e.type as ComponentEdgeType] ?? edgeStyles.links_library
+      const dimmed = matchedNodeIds && (!matchedNodeIds.has(e.source) && !matchedNodeIds.has(e.target))
+      return {
+        id: `${e.source}-${e.target}-${e.type}`,
+        source: e.source,
+        target: e.target,
+        animated: e.type === 'starts_service',
+        style: {
+          ...style,
+          opacity: dimmed ? 0.1 : undefined,
+        },
+      }
+    })
+  }, [processedEdges, matchedNodeIds])
 
   // Apply dagre layout
   const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
@@ -206,11 +302,28 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
+      const data = node.data as unknown as ComponentNodeData
+      // If it's a cluster node, toggle expansion
+      if (data.metadata?.isCluster) {
+        const clusterInfo = clusters.get(node.id)
+        if (clusterInfo) {
+          setExpandedClusters((prev) => {
+            const next = new Set(prev)
+            if (next.has(clusterInfo.dir)) {
+              next.delete(clusterInfo.dir)
+            } else {
+              next.add(clusterInfo.dir)
+            }
+            return next
+          })
+        }
+        return
+      }
       if (projectId) {
         navigate(`/projects/${projectId}/explore?path=${encodeURIComponent(node.id)}`)
       }
     },
-    [navigate, projectId],
+    [navigate, projectId, clusters],
   )
 
   const handleEdgeClick: EdgeMouseHandler = useCallback(
@@ -290,15 +403,11 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
     if (!contextMenu || contextMenu.kind !== 'edge') return
     const { edgeSource, edgeTarget, edgeType } = contextMenu
     const label = edgeTypeLabels[edgeType!] ?? edgeType
-    // Attach the source file so the AI has context
     if (edgeSource) {
       addAttachment({ path: edgeSource, name: edgeSource.split('/').pop() ?? edgeSource })
     }
     setContextMenu(null)
     onRequestChat?.()
-    // Add a pre-filled prompt hint by using the chat store to add a user-facing message context
-    // The user can see the attachment and ask about the relationship
-    // We use a brief timeout so the chat panel opens first
     setTimeout(() => {
       const chatInput = document.querySelector<HTMLTextAreaElement>('[data-chat-input]')
       if (chatInput) {
@@ -320,6 +429,11 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
       }
       return next
     })
+  }, [])
+
+  const handleToggleClustering = useCallback(() => {
+    setClusteringEnabled((v) => !v)
+    setExpandedClusters(new Set())
   }, [])
 
   const miniMapNodeColor = useCallback((node: Node) => {
@@ -368,12 +482,21 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
         visibleTypes={visibleTypes}
         onToggleType={handleToggleType}
         onSearch={setSearchQuery}
+        graph={graph}
+        clusteringEnabled={clusteringEnabled}
+        onToggleClustering={handleToggleClustering}
+        showClusterToggle={graph.nodes.length >= CLUSTER_THRESHOLD}
       />
 
       {/* Stats badge */}
       <div className="absolute bottom-3 left-3 z-10 rounded-md border border-border bg-background/95 px-2 py-1 text-[10px] text-muted-foreground shadow-sm backdrop-blur">
         {nodes.length} nodes &middot; {edges.length} edges
         {graph.truncated && <span className="ml-1 text-yellow-500">(truncated)</span>}
+        {clusteringEnabled && expandedClusters.size > 0 && (
+          <span className="ml-1">
+            &middot; {expandedClusters.size} expanded
+          </span>
+        )}
       </div>
 
       {/* Edge details popover */}

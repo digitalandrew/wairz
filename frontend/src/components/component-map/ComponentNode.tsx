@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
-import { Cpu, Package, Terminal, Settings, Play } from 'lucide-react'
+import { Cpu, Package, Terminal, Settings, Play, Layers } from 'lucide-react'
 import type { ComponentNodeType } from '@/types'
 
 export interface ComponentNodeData extends Record<string, unknown> {
@@ -35,8 +35,9 @@ function formatSize(bytes: number): string {
 
 function ComponentNodeComponent({ data, selected }: NodeProps) {
   const nodeData = data as unknown as ComponentNodeData
+  const isCluster = !!nodeData.metadata?.isCluster
   const style = nodeStyles[nodeData.nodeType] ?? nodeStyles.binary
-  const Icon = style.icon
+  const Icon = isCluster ? Layers : style.icon
   const color = iconColor[nodeData.nodeType] ?? 'text-blue-400'
 
   return (
@@ -44,16 +45,17 @@ function ComponentNodeComponent({ data, selected }: NodeProps) {
       <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-border !bg-muted-foreground" />
       <div
         className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${style.bg} ${style.border} ${
-          selected ? 'ring-2 ring-ring' : ''
-        }`}
+          isCluster ? 'border-dashed' : ''
+        } ${selected ? 'ring-2 ring-ring' : ''}`}
       >
         <Icon className={`h-4 w-4 shrink-0 ${color}`} />
         <div className="min-w-0">
-          <div className="truncate text-xs font-medium text-foreground" style={{ maxWidth: 140 }}>
+          <div className="truncate text-xs font-medium text-foreground" style={{ maxWidth: isCluster ? 160 : 140 }}>
             {nodeData.label}
           </div>
           <div className="text-[10px] text-muted-foreground">
             {formatSize(nodeData.size)}
+            {isCluster && <span className="ml-1">&middot; click to expand</span>}
           </div>
         </div>
       </div>
