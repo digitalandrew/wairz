@@ -89,6 +89,8 @@ Wairz is an open-source, browser-based firmware reverse engineering and security
 | RE: Binary | radare2 (r2pipe), pyelftools | Disassembly, ELF parsing |
 | RE: Decompile | Ghidra headless (via analyzeHeadless) | Pseudo-C decompilation |
 | Emulation | QEMU (user-mode + system-mode) | ARM, MIPS, x86 firmware emulation in isolated container |
+| SBOM | cyclonedx-python-lib, packageurl-python | CycloneDX SBOM generation, PURL identifiers |
+| CVE Lookup | nvdlib | NVD API client for known vulnerability queries |
 | AI | Anthropic Claude API (tool use, streaming) | claude-sonnet-4-20250514 for tool use |
 | Containers | Docker + Docker Compose | Local self-hosted deployment |
 | Testing | pytest (backend), Vitest (frontend) | Unit + integration |
@@ -177,13 +179,15 @@ wairz/
 │   │   │   ├── firmware.py
 │   │   │   ├── conversation.py
 │   │   │   ├── finding.py
-│   │   │   └── analysis_cache.py
+│   │   │   ├── analysis_cache.py
+│   │   │   └── sbom.py          # SbomComponent, SbomVulnerability models
 │   │   ├── schemas/             # Pydantic request/response schemas
 │   │   │   ├── __init__.py
 │   │   │   ├── project.py
 │   │   │   ├── firmware.py
 │   │   │   ├── chat.py
-│   │   │   └── finding.py
+│   │   │   ├── finding.py
+│   │   │   └── sbom.py          # SBOM request/response schemas
 │   │   ├── routers/             # FastAPI routers
 │   │   │   ├── __init__.py
 │   │   │   ├── projects.py
@@ -191,6 +195,7 @@ wairz/
 │   │   │   ├── analysis.py
 │   │   │   ├── chat.py          # WebSocket endpoint
 │   │   │   ├── component_map.py # Component graph endpoint
+│   │   │   ├── sbom.py          # SBOM generation & vulnerability scan
 │   │   │   └── findings.py
 │   │   ├── services/            # Business logic
 │   │   │   ├── __init__.py
@@ -198,6 +203,8 @@ wairz/
 │   │   │   ├── file_service.py
 │   │   │   ├── analysis_service.py
 │   │   │   ├── component_map_service.py # Graph builder: dependency analysis
+│   │   │   ├── sbom_service.py          # SBOM generation from firmware FS
+│   │   │   ├── vulnerability_service.py # CVE lookup via NVD
 │   │   │   └── finding_service.py
 │   │   ├── ai/                  # AI orchestration
 │   │   │   ├── __init__.py
@@ -210,6 +217,7 @@ wairz/
 │   │   │       ├── strings.py
 │   │   │       ├── binary.py
 │   │   │       ├── security.py
+│   │   │       ├── sbom.py      # SBOM generation & CVE lookup tools
 │   │   │       └── reporting.py
 │   │   ├── workers/             # Background task handlers
 │   │   │   ├── __init__.py
@@ -301,7 +309,10 @@ CREATE TABLE findings (
     file_path VARCHAR(512),            -- affected file
     line_number INTEGER,
     cve_ids TEXT[],                     -- associated CVEs
+    cwe_ids TEXT[],                     -- associated CWEs
     status VARCHAR(20) DEFAULT 'open', -- open, confirmed, false_positive, fixed
+    source VARCHAR(50) DEFAULT 'manual', -- manual, ai_discovered, sbom_scan, fuzzing, security_review
+    component_id UUID,                  -- FK to sbom_components if source='sbom_scan'
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -342,6 +353,44 @@ CREATE TABLE emulation_sessions (
 
 CREATE INDEX idx_emulation_project ON emulation_sessions(project_id);
 CREATE INDEX idx_emulation_status ON emulation_sessions(status);
+
+-- SBOM components identified from firmware filesystem
+CREATE TABLE sbom_components (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    firmware_id UUID REFERENCES firmware(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,              -- e.g., "busybox", "openssl", "dropbear"
+    version VARCHAR(100),                    -- e.g., "1.33.1", "1.1.1k"
+    type VARCHAR(50) NOT NULL,               -- 'application', 'library', 'firmware', 'operating-system'
+    cpe VARCHAR(255),                        -- CPE 2.3 URI, e.g., "cpe:2.3:a:busybox:busybox:1.33.1:*:*:*:*:*:*:*"
+    purl VARCHAR(512),                       -- Package URL, e.g., "pkg:generic/busybox@1.33.1"
+    supplier VARCHAR(255),                   -- Vendor/supplier name
+    detection_source VARCHAR(100) NOT NULL,  -- 'package_manager', 'binary_strings', 'library_soname', 'kernel_modules', 'config_file'
+    detection_confidence VARCHAR(20),        -- 'high', 'medium', 'low'
+    file_paths TEXT[],                       -- Filesystem paths associated with this component
+    metadata JSONB DEFAULT '{}',             -- Additional info: license, description, etc.
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Vulnerability matches from CVE lookup
+CREATE TABLE sbom_vulnerabilities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    component_id UUID REFERENCES sbom_components(id) ON DELETE CASCADE,
+    firmware_id UUID REFERENCES firmware(id) ON DELETE CASCADE,
+    cve_id VARCHAR(20) NOT NULL,             -- e.g., "CVE-2021-42374"
+    cvss_score DECIMAL(3,1),                 -- e.g., 9.8
+    cvss_vector VARCHAR(255),                -- CVSS 3.1 vector string
+    severity VARCHAR(20) NOT NULL,           -- critical, high, medium, low
+    description TEXT,
+    published_date TIMESTAMPTZ,
+    finding_id UUID REFERENCES findings(id), -- Link to auto-generated finding
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_sbom_firmware ON sbom_components(firmware_id);
+CREATE INDEX idx_sbom_vulns_component ON sbom_vulnerabilities(component_id);
+CREATE INDEX idx_sbom_vulns_firmware ON sbom_vulnerabilities(firmware_id);
+CREATE INDEX idx_sbom_vulns_cve ON sbom_vulnerabilities(cve_id);
+CREATE INDEX idx_findings_source ON findings(source);
 ```
 
 ---
@@ -392,6 +441,15 @@ These are the tools registered with the Claude API for the tool-use loop. Each t
 | `check_setuid_binaries` | `path?: str` | List of setuid/setgid binaries | Filesystem scan |
 | `analyze_init_scripts` | `path?: str` | Services started at boot, exposed ports, running as root | Parses init.d, systemd, inittab |
 | `check_filesystem_permissions` | `path?: str` | World-writable files, weak permissions on sensitive files | Recursive scan |
+
+### SBOM & Vulnerability Tools (`tools/sbom.py`)
+
+| Tool | Parameters | Returns | Notes |
+|---|---|---|---|
+| `generate_sbom` | `force_rescan?: bool` | SBOM summary: component count by type, notable components with versions | Triggers SBOM generation if not cached. Returns text summary for AI context |
+| `get_sbom_components` | `type?: str, name_filter?: str` | List of identified components with versions and detection source | Filterable by type and name pattern. Max 100 results |
+| `check_component_cves` | `component_name: str, version: str` | Known CVEs for the component with severity and CVSS scores | Queries NVD API. Returns formatted CVE list |
+| `run_vulnerability_scan` | `force_rescan?: bool` | Vulnerability summary: counts by severity, top critical CVEs, findings created | Triggers full SBOM + CVE scan. Auto-creates findings with `source='sbom_scan'` |
 
 ### Emulation Tools (`tools/emulation.py`)
 
@@ -486,6 +544,14 @@ GET    /api/v1/projects/{id}/analysis/disasm?path=&function=  # Disassemble
 
 # Component Map
 GET    /api/v1/projects/{id}/component-map  # Build & return component dependency graph
+
+# SBOM & Vulnerability Scanning
+POST   /api/v1/projects/{id}/sbom/generate                # Generate/regenerate SBOM from firmware
+GET    /api/v1/projects/{id}/sbom                          # Get SBOM components list
+GET    /api/v1/projects/{id}/sbom/export?format=           # Export SBOM (cyclonedx-json, spdx-json)
+POST   /api/v1/projects/{id}/sbom/vulnerabilities/scan     # Trigger vulnerability scan against NVD
+GET    /api/v1/projects/{id}/sbom/vulnerabilities          # Get vulnerability results
+GET    /api/v1/projects/{id}/sbom/vulnerabilities/summary  # Vulnerability stats summary
 
 # Emulation
 POST   /api/v1/projects/{id}/emulation/start              # Start emulation session
@@ -1512,11 +1578,291 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
 ---
 
-### Phase 9: Automated Fuzzing (Sessions 32–35)
+### Phase 9: SBOM & Known Vulnerability Look-Up (Sessions 32–34)
+
+**Goal:** Generate a Software Bill of Materials (SBOM) from the extracted firmware filesystem and kernel, then check component versions against known vulnerability databases (NVD) to identify inherited vulnerabilities. Findings are automatically created with a distinct `source='sbom_scan'` tag to differentiate them from vulnerabilities discovered through manual analysis, AI investigation, or fuzzing. This gives users an immediate, automated overview of known risk before deeper manual analysis begins.
+
+#### Session 9.1: SBOM Generation Backend — Component Identification Engine
+
+**Do:**
+- Install Python dependencies: `cyclonedx-python-lib`, `packageurl-python`
+- Create SQLAlchemy models in `app/models/sbom.py`:
+  ```python
+  class SbomComponent(Base):
+      __tablename__ = "sbom_components"
+      id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid())
+      firmware_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("firmware.id", ondelete="CASCADE"))
+      name: Mapped[str] = mapped_column(String(255))
+      version: Mapped[str | None] = mapped_column(String(100))
+      type: Mapped[str] = mapped_column(String(50))       # 'application', 'library', 'firmware', 'operating-system'
+      cpe: Mapped[str | None] = mapped_column(String(255))
+      purl: Mapped[str | None] = mapped_column(String(512))
+      supplier: Mapped[str | None] = mapped_column(String(255))
+      detection_source: Mapped[str] = mapped_column(String(100))  # 'package_manager', 'binary_strings', 'library_soname', 'kernel_modules', 'config_file'
+      detection_confidence: Mapped[str | None] = mapped_column(String(20))
+      file_paths: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+      metadata: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'"))
+      created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+      vulnerabilities: Mapped[list["SbomVulnerability"]] = relationship(back_populates="component", cascade="all, delete-orphan")
+
+  class SbomVulnerability(Base):
+      __tablename__ = "sbom_vulnerabilities"
+      id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid())
+      component_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sbom_components.id", ondelete="CASCADE"))
+      firmware_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("firmware.id", ondelete="CASCADE"))
+      cve_id: Mapped[str] = mapped_column(String(20))
+      cvss_score: Mapped[float | None] = mapped_column(Numeric(3, 1))
+      cvss_vector: Mapped[str | None] = mapped_column(String(255))
+      severity: Mapped[str] = mapped_column(String(20))
+      description: Mapped[str | None] = mapped_column(Text)
+      published_date: Mapped[datetime | None]
+      finding_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("findings.id"))
+      created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+      component: Mapped["SbomComponent"] = relationship(back_populates="vulnerabilities")
+  ```
+- Create Alembic migration for `sbom_components` and `sbom_vulnerabilities` tables, plus `ALTER TABLE findings ADD COLUMN source VARCHAR(50) DEFAULT 'manual'` and `ADD COLUMN component_id UUID`
+- Create `app/services/sbom_service.py` with `SbomService` class:
+  - `generate_sbom(firmware_id, extracted_path, force_rescan=False)` → `list[SbomComponent]`
+  - Component identification strategies (run in order, dedup by name+version):
+    1. **Package manager databases:** Parse opkg status (`/usr/lib/opkg/status`, `/var/lib/opkg/status`), dpkg status (`/var/lib/dpkg/status`), RPM DB. Extract package name, version, architecture, description. Detection confidence: `high`
+    2. **Kernel version:** Parse `/lib/modules/*/` directory names, search for version strings in `/proc/version` or kernel binaries. Build CPE for the Linux kernel. Detection confidence: `high`
+    3. **Library SONAME parsing:** Scan `/lib/*.so*`, `/usr/lib/*.so*` for versioned shared libraries (e.g., `libssl.so.1.1.1k` → OpenSSL 1.1.1k). Parse ELF `SONAME` via `pyelftools`. Detection confidence: `high`
+    4. **Binary version strings:** Run `strings` on key ELF binaries (`busybox`, `httpd`, `dropbear`, `dnsmasq`, etc.) and match against known version patterns (e.g., `BusyBox v1.33.1`, `OpenSSH_8.4`, `lighttpd/1.4.59`). Detection confidence: `medium`
+    5. **Config file version hints:** Parse web interface HTML/JS for product version, check `/etc/*release`, `/etc/banner`, `/etc/openwrt_release`. Detection confidence: `low`
+  - Build CPE 2.3 identifiers for each component using known vendor:product mappings (maintain a lookup dict for common embedded components: busybox, openssl, dropbear, dnsmasq, lighttpd, iptables, curl, etc.)
+  - Build Package URLs (PURL) using `packageurl-python`
+  - Cache SBOM in the database (check if `sbom_components` exist for this `firmware_id` before regenerating)
+  - Generate CycloneDX JSON SBOM using `cyclonedx-python-lib` for export
+- Create Pydantic schemas in `app/schemas/sbom.py`:
+  ```python
+  class SbomComponentResponse(BaseModel):
+      id: uuid.UUID
+      firmware_id: uuid.UUID
+      name: str
+      version: str | None
+      type: str
+      cpe: str | None
+      purl: str | None
+      supplier: str | None
+      detection_source: str
+      detection_confidence: str | None
+      file_paths: list[str] | None
+      metadata: dict
+      vulnerability_count: int = 0
+      created_at: datetime
+      model_config = ConfigDict(from_attributes=True)
+
+  class SbomSummaryResponse(BaseModel):
+      total_components: int
+      components_by_type: dict[str, int]
+      components_with_vulns: int
+      total_vulnerabilities: int
+      vulns_by_severity: dict[str, int]
+      scan_date: datetime | None
+  ```
+
+**Definition of Done:**
+- SBOM service identifies packages from opkg/dpkg databases, library SONAMEs, binary version strings, and kernel modules
+- Each component has a CPE identifier and detection confidence level
+- SBOM is persisted to `sbom_components` table and cached per firmware
+- CycloneDX JSON export produces a valid SBOM document
+- Re-running on the same firmware returns cached results (unless `force_rescan=True`)
+
+#### Session 9.2: Vulnerability Lookup & Findings Integration
+
+**Do:**
+- Install Python dependency: `nvdlib`
+- Create `app/services/vulnerability_service.py`:
+  - `VulnerabilityService` class:
+    - `scan_components(firmware_id, components: list[SbomComponent], force_rescan=False)` → `VulnerabilityScanResult`
+    - For each component with a CPE identifier:
+      1. Query NVD API via `nvdlib.searchCVE(cpeName=cpe)` (or `keywordSearch` for components without exact CPE)
+      2. Respect NVD rate limits: 0.6 req/s without API key, 6 req/s with key (use `asyncio.Semaphore` + `asyncio.sleep`)
+      3. For each CVE match: extract CVSS score, vector, severity, description, published date
+      4. Map CVSS to severity: ≥9.0 = critical, ≥7.0 = high, ≥4.0 = medium, <4.0 = low
+      5. Store in `sbom_vulnerabilities` table
+    - `_create_findings_from_vulns(firmware_id, project_id, vulns)`:
+      - Group vulnerabilities by component to avoid one finding per CVE (noisy)
+      - Strategy: create one finding per component with critical/high CVEs, list all CVEs in evidence
+      - Finding fields:
+        - `title`: "Known vulnerabilities in {component} {version}"
+        - `severity`: highest severity among the component's CVEs
+        - `description`: "SBOM scan identified {n} known CVEs in {component} {version}. This is an inherited vulnerability from a third-party component included in the firmware."
+        - `evidence`: formatted list of CVEs with scores and descriptions
+        - `source`: `'sbom_scan'`
+        - `component_id`: reference to the `sbom_components` record
+        - `cve_ids`: array of CVE IDs
+        - `file_paths`: from the component's `file_paths`
+      - For components with only medium/low CVEs, create a single grouped finding per severity tier to reduce noise
+    - `get_vulnerability_summary(firmware_id)` → `SbomSummaryResponse`
+  - Handle NVD API errors gracefully: timeout → skip component, rate limit → retry with backoff, API down → use cached results if available
+- Create `app/routers/sbom.py`:
+  - `POST /api/v1/projects/{id}/sbom/generate` — triggers SBOM generation, returns component list
+    - Calls `_resolve_firmware()` (reuse from analysis.py), then `sbom_service.generate_sbom()`
+    - Returns `list[SbomComponentResponse]`
+  - `GET /api/v1/projects/{id}/sbom` — returns cached SBOM components with vulnerability counts
+    - Query params: `type?: str`, `name?: str`, `has_vulns?: bool` for filtering
+  - `GET /api/v1/projects/{id}/sbom/export?format=cyclonedx-json` — export SBOM document
+    - Also support `format=spdx-json` (stretch goal, CycloneDX primary)
+    - Returns file download with appropriate Content-Type
+  - `POST /api/v1/projects/{id}/sbom/vulnerabilities/scan` — triggers CVE lookup for all SBOM components
+    - Body: `{ force_rescan?: bool }`
+    - Returns `VulnerabilityScanResponse` with summary stats
+  - `GET /api/v1/projects/{id}/sbom/vulnerabilities` — returns all vulnerability matches
+    - Query params: `severity?: str`, `component_id?: str`, `cve_id?: str`
+    - Includes component name/version via join
+  - `GET /api/v1/projects/{id}/sbom/vulnerabilities/summary` — aggregated stats
+- Add Pydantic schemas for vulnerability responses:
+  ```python
+  class SbomVulnerabilityResponse(BaseModel):
+      id: uuid.UUID
+      component_id: uuid.UUID
+      cve_id: str
+      cvss_score: float | None
+      cvss_vector: str | None
+      severity: str
+      description: str | None
+      published_date: datetime | None
+      finding_id: uuid.UUID | None
+      component_name: str | None = None
+      component_version: str | None = None
+      model_config = ConfigDict(from_attributes=True)
+
+  class VulnerabilityScanRequest(BaseModel):
+      force_rescan: bool = False
+
+  class VulnerabilityScanResponse(BaseModel):
+      status: str
+      total_components_scanned: int
+      total_vulnerabilities_found: int
+      findings_created: int
+      vulns_by_severity: dict[str, int]
+  ```
+- Register router in `app/main.py`
+- Add SBOM AI tools to `app/ai/tools/sbom.py`:
+  - `generate_sbom` — triggers SBOM generation, returns text summary (component count by type, notable components with versions)
+  - `get_sbom_components` — returns filtered component list as formatted text
+  - `check_component_cves` — queries NVD for a specific component+version, returns CVE list
+  - `run_vulnerability_scan` — triggers full scan, returns summary with auto-created finding count
+- Register tools in tool registry
+- Update `add_finding` tool to support optional `source` parameter (default `'ai_discovered'` when called from AI)
+
+**Definition of Done:**
+- Vulnerability scan queries NVD for all SBOM components with CPE identifiers
+- CVE matches are stored in `sbom_vulnerabilities` with CVSS scores and severity
+- Findings are auto-created with `source='sbom_scan'` and grouped by component (not one per CVE)
+- Findings include CVE IDs, CVSS scores, and evidence text explaining the inherited nature
+- NVD rate limiting is respected (graceful with/without API key)
+- All REST endpoints return correct data
+- AI tools allow the assistant to generate SBOMs and run vulnerability scans during chat
+- Second scan returns cached results unless `force_rescan=True`
+
+#### Session 9.3: Frontend — SBOM Viewer & Vulnerability Dashboard
+
+**Do:**
+- Add TypeScript types to `src/types/index.ts`:
+  ```typescript
+  export type DetectionSource = 'package_manager' | 'binary_strings' | 'library_soname' | 'kernel_modules' | 'config_file'
+  export type DetectionConfidence = 'high' | 'medium' | 'low'
+  export type FindingSource = 'manual' | 'ai_discovered' | 'sbom_scan' | 'fuzzing' | 'security_review'
+
+  export interface SbomComponent {
+    id: string
+    firmware_id: string
+    name: string
+    version: string | null
+    type: string
+    cpe: string | null
+    purl: string | null
+    supplier: string | null
+    detection_source: DetectionSource
+    detection_confidence: DetectionConfidence
+    file_paths: string[] | null
+    metadata: Record<string, unknown>
+    vulnerability_count: number
+    created_at: string
+  }
+
+  export interface SbomVulnerability {
+    id: string
+    component_id: string
+    cve_id: string
+    cvss_score: number | null
+    cvss_vector: string | null
+    severity: Severity
+    description: string | null
+    published_date: string | null
+    finding_id: string | null
+    component_name: string | null
+    component_version: string | null
+  }
+
+  export interface SbomSummary {
+    total_components: int
+    components_by_type: Record<string, number>
+    components_with_vulns: number
+    total_vulnerabilities: number
+    vulns_by_severity: Record<string, number>
+    scan_date: string | null
+  }
+
+  export interface VulnerabilityScanResult {
+    status: string
+    total_components_scanned: number
+    total_vulnerabilities_found: number
+    findings_created: number
+    vulns_by_severity: Record<string, number>
+  }
+  ```
+- Update `Finding` interface to include `source: FindingSource` and `component_id: string | null`
+- Create API client in `src/api/sbom.ts`:
+  - `generateSbom(projectId)` → `SbomComponent[]`
+  - `getSbomComponents(projectId, filters?)` → `SbomComponent[]`
+  - `exportSbom(projectId, format)` → blob download
+  - `runVulnerabilityScan(projectId, forceRescan?)` → `VulnerabilityScanResult`
+  - `getVulnerabilities(projectId, filters?)` → `SbomVulnerability[]`
+  - `getVulnerabilitySummary(projectId)` → `SbomSummary`
+- Create `frontend/src/pages/SbomPage.tsx`:
+  - **SBOM tab:**
+    - "Generate SBOM" button (shown if no SBOM exists yet, or "Regenerate" if one exists)
+    - Component table with sortable columns: Name, Version, Type, Detection Source, Confidence, Vulns
+    - Filter by component type (application, library, operating-system)
+    - Search by component name
+    - Click a component row to expand and show: file paths, CPE, PURL, associated vulnerabilities
+    - Color-coded vulnerability count badge per component (red for critical/high, orange for medium, gray for low/none)
+    - "Export SBOM" button (CycloneDX JSON download)
+  - **Vulnerabilities tab:**
+    - "Scan for Vulnerabilities" button with loading state (NVD queries can take 30-60s for large SBOMs)
+    - Summary cards at the top: total vulns, critical, high, medium, low — styled like a dashboard
+    - Vulnerability table: CVE ID (linked to NVD), Component, Version, CVSS Score, Severity, Published Date
+    - Filter by severity, component
+    - Click a CVE row to see full description and link to the auto-generated finding
+  - **Both tabs** share a header showing: firmware name, total components identified, last scan date
+- Update `FindingsList.tsx`:
+  - Add a "Source" column or badge showing finding origin: "Manual", "AI Discovered", "SBOM Scan", "Fuzzing", "Security Review"
+  - SBOM scan findings show a distinct visual treatment: a package icon and "Inherited Vulnerability" subtitle
+  - Add filter by source to the findings filter controls
+  - When clicking an SBOM-sourced finding, show a link to the associated component in the SBOM viewer
+- Add route: `/projects/:id/sbom`
+- Add "SBOM" navigation item to the project sidebar (between "Map" and "Emulation" or after "Findings")
+
+**Definition of Done:**
+- SBOM page displays all identified components in a sortable, filterable table
+- Can generate and regenerate SBOM from the UI
+- Can trigger vulnerability scan and see results with severity breakdown
+- Vulnerability results link to auto-created findings
+- Findings list distinguishes SBOM-sourced findings with "Inherited Vulnerability" badge and source filter
+- CycloneDX JSON export downloads correctly
+- Loading states for SBOM generation (fast) and vulnerability scanning (slower due to NVD queries)
+- Empty states for projects with no SBOM generated yet
+
+---
+
+### Phase 10: Automated Fuzzing (Sessions 35–38)
 
 **Goal:** Integrate AFL++ fuzzing into the emulation environment with AI assistance for target selection, harness/shim generation, and crash triage, enabling automated vulnerability discovery in firmware binaries.
 
-#### Session 9.1: Fuzzing Infrastructure — AFL++ Integration
+#### Session 10.1: Fuzzing Infrastructure — AFL++ Integration
 
 **Do:**
 - Update `emulation/Dockerfile` (or create a dedicated `fuzzing/Dockerfile`):
@@ -1549,7 +1895,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Crash inputs are collected and deduplicated
 - Crash triage produces stack traces and exploitability classification
 
-#### Session 9.2: Fuzzing API & Database
+#### Session 10.2: Fuzzing API & Database
 
 **Do:**
 - Create Alembic migration for `fuzzing_campaigns` table:
@@ -1586,7 +1932,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Crash list and triage endpoints return useful data
 - Binary analysis endpoint identifies good fuzzing targets
 
-#### Session 9.3: Fuzzing Frontend
+#### Session 10.3: Fuzzing Frontend
 
 **Do:**
 - Create `frontend/src/pages/FuzzingPage.tsx`:
@@ -1619,7 +1965,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Can create security findings from discovered crashes
 - Campaign wizard guides users through setup
 
-#### Session 9.4: Fuzzing AI Integration — Smart Target Selection & Harness Generation
+#### Session 10.4: Fuzzing AI Integration — Smart Target Selection & Harness Generation
 
 **Do:**
 - Add fuzzing-related AI tools to `app/ai/tools/`:
@@ -1651,11 +1997,11 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
 ---
 
-### Phase 10: Project Export & Import (Sessions 36–38)
+### Phase 11: Project Export & Import (Sessions 39–41)
 
-**Goal:** Enable users to export entire projects as portable archive files and import them on another instance, supporting team collaboration, project sharing, and backup/restore workflows. This phase is intentionally last (before polish) so the archive format captures all features: findings, conversations, documents, analysis cache, emulation configs, and fuzzing campaigns.
+**Goal:** Enable users to export entire projects as portable archive files and import them on another instance, supporting team collaboration, project sharing, and backup/restore workflows. This phase is intentionally last (before polish) so the archive format captures all features: findings, conversations, documents, analysis cache, SBOM data, emulation configs, and fuzzing campaigns.
 
-#### Session 10.1: Export Backend — Project Archive Builder
+#### Session 11.1: Export Backend — Project Archive Builder
 
 **Do:**
 - Create `app/services/export_service.py` — builds a self-contained project archive:
@@ -1669,6 +2015,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
     - `findings/` — all findings as JSON (title, severity, description, evidence, file_path, status, cve_ids)
     - `documents/` — project documents (notes) with metadata and content
     - `analysis_cache/` — cached analysis results (component map, Ghidra decompilations, code cleanups, etc.) as JSON keyed by operation
+    - `sbom/` — SBOM components and vulnerability scan results as JSON
     - `fuzzing_campaigns/` — fuzzing campaign configs, stats, and crash inputs
     - `reviews/` — security review results and agent findings
   - Stream the ZIP to avoid loading everything into memory — use `zipfile.ZipFile` with a streaming response or write to a temp file
@@ -1682,11 +2029,11 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
 **Definition of Done:**
 - Can export a project with unpacked firmware to a `.wairz` archive
-- Archive contains all project data: metadata, firmware, filesystem, conversations, findings, documents, cache, fuzzing campaigns, reviews
+- Archive contains all project data: metadata, firmware, filesystem, conversations, findings, documents, cache, SBOM, fuzzing campaigns, reviews
 - Download starts promptly even for large projects (streaming)
 - Archive can be opened as a standard ZIP for inspection
 
-#### Session 10.2: Import Backend — Project Archive Importer
+#### Session 11.2: Import Backend — Project Archive Importer
 
 **Do:**
 - Add import logic to `app/services/export_service.py` (or create `app/services/import_service.py`):
@@ -1698,8 +2045,8 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
   - Restore firmware metadata from `firmware.json` (generate new firmware UUID)
   - Extract `firmware/original/` to the storage root
   - Extract `firmware/extracted/` to the storage root (restore file permissions from manifest if available)
-  - Restore conversations, findings, documents, analysis cache, fuzzing campaigns, and reviews into the database
-  - Remap all UUIDs: project_id, firmware_id, conversation_ids, finding_ids, document_ids, campaign_ids, review_ids — generate new ones while preserving internal references
+  - Restore conversations, findings, documents, analysis cache, SBOM data, fuzzing campaigns, and reviews into the database
+  - Remap all UUIDs: project_id, firmware_id, conversation_ids, finding_ids, document_ids, component_ids, campaign_ids, review_ids — generate new ones while preserving internal references
   - Set project status to `ready` if extracted filesystem is present, otherwise `created`
 - Add to `app/routers/export_import.py`:
   - `POST /api/v1/projects/import` — accepts a multipart file upload of a `.wairz` archive
@@ -1710,12 +2057,12 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
 **Definition of Done:**
 - Can import a `.wairz` archive and get a fully functional project
-- All data is restored: firmware, filesystem, conversations, findings, documents, cache, fuzzing campaigns, reviews
-- Imported project works identically to the original (can browse files, view findings, chat with AI, see fuzzing results)
+- All data is restored: firmware, filesystem, conversations, findings, documents, cache, SBOM, fuzzing campaigns, reviews
+- Imported project works identically to the original (can browse files, view findings, chat with AI, see SBOM/vulnerability data, see fuzzing results)
 - ZIP slip and path traversal attacks are prevented
 - Duplicate imports create separate projects (no conflicts)
 
-#### Session 10.3: Export/Import Frontend
+#### Session 11.3: Export/Import Frontend
 
 **Do:**
 - Add export button to `ProjectDetailPage.tsx`:
@@ -1742,9 +2089,9 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
 ---
 
-### Phase 11: Polish & Release (Sessions 39–42)
+### Phase 12: Polish & Release (Sessions 42–45)
 
-#### Session 11.1: Background Tasks & Status
+#### Session 12.1: Background Tasks & Status
 
 **Do:**
 - Set up `arq` worker with Redis
@@ -1752,7 +2099,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Add real-time status updates via WebSocket or polling
 - Add progress indicators for long-running operations (Ghidra analysis, full scan, emulation startup, fuzzing)
 
-#### Session 11.2: Error Handling & Edge Cases
+#### Session 12.2: Error Handling & Edge Cases
 
 **Do:**
 - Handle: corrupt firmware, unsupported formats, very large files, empty filesystems
@@ -1762,7 +2109,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Comprehensive error messages for users
 - Handle emulation and fuzzing edge cases (unsupported architectures, missing kernels, insufficient resources)
 
-#### Session 11.3: Documentation & Testing
+#### Session 12.3: Documentation & Testing
 
 **Do:**
 - Write comprehensive `README.md`:
@@ -1774,12 +2121,13 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 - Write API documentation (FastAPI auto-generates OpenAPI, but add descriptions)
 - Add integration tests for critical paths:
   - Upload → unpack → browse → AI analysis → finding creation
+  - SBOM generation → vulnerability scan → findings creation
   - Export → import round-trip
   - Emulation start → terminal → stop
   - Fuzzing campaign lifecycle
 - Add example firmware images for testing (OpenWrt, DD-WRT, etc.)
 
-#### Session 11.4: Final Integration & Release
+#### Session 12.4: Final Integration & Release
 
 **Do:**
 - End-to-end testing of full workflow
@@ -1841,6 +2189,8 @@ MAX_UPLOAD_SIZE_MB=500
 MAX_TOOL_OUTPUT_KB=30
 MAX_TOOL_ITERATIONS=25
 GHIDRA_PATH=/opt/ghidra
+NVD_API_KEY=                         # Optional NVD API key for higher rate limits (6 req/s vs 0.6 req/s)
+SBOM_CVE_DB_CACHE_DIR=/data/cve-db   # Local cache directory for NVD CVE data
 EMULATION_TIMEOUT_MINUTES=30
 EMULATION_KERNEL_DIR=/opt/emulation/kernels
 EMULATION_MAX_SESSIONS=3
