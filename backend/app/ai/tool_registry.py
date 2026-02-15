@@ -14,6 +14,8 @@ class ToolContext:
     firmware_id: UUID
     extracted_path: str
     db: AsyncSession
+    review_id: UUID | None = None
+    review_agent_id: UUID | None = None
 
 
 @dataclass
@@ -41,6 +43,14 @@ class ToolRegistry:
             input_schema=input_schema,
             handler=handler,
         )
+
+    def subset(self, tool_names: list[str]) -> "ToolRegistry":
+        """Return a new ToolRegistry containing only the named tools."""
+        new_registry = ToolRegistry()
+        for name in tool_names:
+            if name in self._tools:
+                new_registry._tools[name] = self._tools[name]
+        return new_registry
 
     def get_anthropic_tools(self) -> list[dict]:
         return [

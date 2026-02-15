@@ -37,3 +37,7 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    reviews: Mapped[list["SecurityReview"]] = relationship(  # noqa: F821
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )

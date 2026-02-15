@@ -56,25 +56,30 @@ class AIOrchestrator:
         db: AsyncSession,
         on_event: Callable[[dict], Awaitable[None]],
         model: str | None = None,
+        system_prompt: str | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+        tool_context_extras: dict | None = None,
     ) -> list[dict]:
         """Run the AI tool-use loop, streaming events via on_event.
 
         Returns the updated messages list with all assistant/tool exchanges appended.
         """
-        system_prompt = build_system_prompt(
-            project_name=project_context.project_name,
-            firmware_filename=project_context.firmware_filename,
-            architecture=project_context.architecture,
-            endianness=project_context.endianness,
-            extracted_path=project_context.extracted_path,
-            documents=project_context.documents,
-        )
+        if system_prompt is None:
+            system_prompt = build_system_prompt(
+                project_name=project_context.project_name,
+                firmware_filename=project_context.firmware_filename,
+                architecture=project_context.architecture,
+                endianness=project_context.endianness,
+                extracted_path=project_context.extracted_path,
+                documents=project_context.documents,
+            )
 
         tool_context = ToolContext(
             project_id=project_context.project_id,
             firmware_id=project_context.firmware_id,
             extracted_path=project_context.extracted_path,
             db=db,
+            **(tool_context_extras or {}),
         )
 
         resolved_model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
@@ -84,6 +89,15 @@ class AIOrchestrator:
 
         try:
             while iteration < self._max_iterations:
+                if cancel_check and cancel_check():
+                    await on_event({
+                        "type": "assistant_text",
+                        "content": "\n\n[Cancelled]",
+                        "delta": False,
+                    })
+                    await on_event({"type": "done"})
+                    return messages
+
                 # Stream the API response
                 async with self._client.messages.stream(
                     model=resolved_model,

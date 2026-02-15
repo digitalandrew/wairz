@@ -241,3 +241,122 @@ export type WSEvent =
   | { type: 'tool_result'; tool: string; tool_use_id: string; output: string }
   | { type: 'error'; content: string }
   | { type: 'done' }
+
+// ── Security Review types ──
+
+export type ReviewStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type AgentStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export type ReviewCategory =
+  | 'filesystem_survey'
+  | 'credential_scan'
+  | 'config_audit'
+  | 'binary_security'
+  | 'permissions_check'
+  | 'deep_binary_analysis'
+  | 'final_review'
+
+export interface ReviewAgent {
+  id: string
+  review_id: string
+  category: ReviewCategory
+  status: AgentStatus
+  model: string
+  conversation_id: string | null
+  scratchpad: string | null
+  findings_count: number
+  tool_calls_count: number
+  error_message: string | null
+  started_at: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface SecurityReview {
+  id: string
+  project_id: string
+  status: ReviewStatus
+  selected_categories: ReviewCategory[]
+  started_at: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+  agents: ReviewAgent[]
+}
+
+export interface ReviewCategoryInfo {
+  id: ReviewCategory
+  label: string
+  description: string
+  model: string
+  modelLabel: string
+  defaultSelected: boolean
+}
+
+export const REVIEW_CATEGORIES: ReviewCategoryInfo[] = [
+  {
+    id: 'filesystem_survey',
+    label: 'Filesystem Survey',
+    description: 'Map directory structure, identify key components and services',
+    model: 'claude-haiku-4-5-20251001',
+    modelLabel: 'Haiku',
+    defaultSelected: true,
+  },
+  {
+    id: 'credential_scan',
+    label: 'Credential Scan',
+    description: 'Find hardcoded credentials, private keys, and secrets',
+    model: 'claude-haiku-4-5-20251001',
+    modelLabel: 'Haiku',
+    defaultSelected: true,
+  },
+  {
+    id: 'config_audit',
+    label: 'Configuration Audit',
+    description: 'Review config files and init scripts for security issues',
+    model: 'claude-sonnet-4-20250514',
+    modelLabel: 'Sonnet',
+    defaultSelected: true,
+  },
+  {
+    id: 'binary_security',
+    label: 'Binary Security',
+    description: 'Check binary protections, known CVEs, and setuid binaries',
+    model: 'claude-sonnet-4-20250514',
+    modelLabel: 'Sonnet',
+    defaultSelected: true,
+  },
+  {
+    id: 'permissions_check',
+    label: 'Permissions Check',
+    description: 'Audit filesystem permissions for privilege escalation risks',
+    model: 'claude-haiku-4-5-20251001',
+    modelLabel: 'Haiku',
+    defaultSelected: true,
+  },
+  {
+    id: 'deep_binary_analysis',
+    label: 'Deep Binary Analysis',
+    description: 'Reverse engineer critical binaries with decompilation',
+    model: 'claude-opus-4-20250918',
+    modelLabel: 'Opus',
+    defaultSelected: false,
+  },
+  {
+    id: 'final_review',
+    label: 'Final Review',
+    description: 'Synthesize results, deduplicate findings, executive summary',
+    model: 'claude-sonnet-4-20250514',
+    modelLabel: 'Sonnet',
+    defaultSelected: true,
+  },
+]
+
+export type ReviewSSEEvent =
+  | { event: 'review_status_change'; data: { review_id: string; status: ReviewStatus } }
+  | { event: 'agent_status_change'; data: { review_id: string; agent_id: string; category: string; status: AgentStatus; tool_calls_count?: number; findings_count?: number; error?: string } }
+  | { event: 'agent_tool_call'; data: { review_id: string; agent_id: string; category: string; tool: string; tool_calls_count: number } }
+  | { event: 'agent_finding'; data: { review_id: string; agent_id: string; category: string; findings_count: number; title: string; severity: string } }
+  | { event: 'review_complete'; data: { review_id: string; status: ReviewStatus } }
+  | { event: 'heartbeat'; data: Record<string, never> }
