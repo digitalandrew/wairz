@@ -360,3 +360,39 @@ export type ReviewSSEEvent =
   | { event: 'agent_finding'; data: { review_id: string; agent_id: string; category: string; findings_count: number; title: string; severity: string } }
   | { event: 'review_complete'; data: { review_id: string; status: ReviewStatus } }
   | { event: 'heartbeat'; data: Record<string, never> }
+
+// ── Component Map types ──
+
+export type ComponentNodeType = 'binary' | 'library' | 'script' | 'config' | 'init_script'
+
+export type ComponentEdgeType =
+  | 'links_library'
+  | 'imports_functions'
+  | 'sources_script'
+  | 'executes'
+  | 'starts_service'
+  | 'configures'
+
+export interface ComponentNode {
+  id: string
+  label: string
+  type: ComponentNodeType
+  path: string
+  size: number
+  metadata: Record<string, unknown>
+}
+
+export interface ComponentEdge {
+  source: string
+  target: string
+  type: ComponentEdgeType
+  details: Record<string, unknown>
+}
+
+export interface ComponentGraph {
+  nodes: ComponentNode[]
+  edges: ComponentEdge[]
+  node_count: number
+  edge_count: number
+  truncated: boolean
+}

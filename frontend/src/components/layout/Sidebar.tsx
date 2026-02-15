@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   FolderSearch,
   ShieldAlert,
+  Network,
   HelpCircle,
 } from 'lucide-react'
 import { Separator } from '@/components/ui/separator'
@@ -23,6 +24,7 @@ const projectSubPages = [
   { suffix: '', label: 'Overview', icon: LayoutDashboard },
   { suffix: '/explore', label: 'File Explorer', icon: FolderSearch },
   { suffix: '/findings', label: 'Findings', icon: ShieldAlert },
+  { suffix: '/map', label: 'Component Map', icon: Network },
 ]
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {

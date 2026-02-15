@@ -1,6 +1,12 @@
+import asyncio
 import os
+from collections import Counter
+
+from sqlalchemy import select
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
+from app.models.analysis_cache import AnalysisCache
+from app.services.component_map_service import ComponentMapService
 from app.services.file_service import FileService
 from app.utils.sandbox import validate_path
 
@@ -181,6 +187,113 @@ async def _handle_find_files_by_type(input: dict, context: ToolContext) -> str:
     )
 
 
+async def _handle_get_component_map(input: dict, context: ToolContext) -> str:
+    """Return a text summary of the firmware component dependency graph."""
+    # Try cached graph first
+    stmt = select(AnalysisCache).where(
+        AnalysisCache.firmware_id == context.firmware_id,
+        AnalysisCache.operation == "component_map",
+    )
+    result = await context.db.execute(stmt)
+    cached = result.scalar_one_or_none()
+
+    if cached and cached.result:
+        data = cached.result
+    else:
+        # Build graph (CPU-bound)
+        service = ComponentMapService(context.extracted_path)
+        loop = asyncio.get_event_loop()
+        graph = await loop.run_in_executor(None, service.build_graph)
+
+        data = {
+            "nodes": [
+                {"id": n.id, "label": n.label, "type": n.type, "path": n.path, "size": n.size}
+                for n in graph.nodes
+            ],
+            "edges": [
+                {"source": e.source, "target": e.target, "type": e.type, "details": e.details}
+                for e in graph.edges
+            ],
+            "truncated": graph.truncated,
+        }
+
+        # Cache the result
+        cache_entry = AnalysisCache(
+            firmware_id=context.firmware_id,
+            operation="component_map",
+            result={**data, "nodes": [
+                {**n, "metadata": {}} for n in data["nodes"]
+            ]},
+        )
+        context.db.add(cache_entry)
+        await context.db.commit()
+
+    nodes = data["nodes"]
+    edges = data["edges"]
+
+    # Build text summary
+    lines: list[str] = []
+    lines.append(f"Component Map: {len(nodes)} components, {len(edges)} relationships")
+    if data.get("truncated"):
+        lines.append("(Graph was truncated to 500 nodes)")
+    lines.append("")
+
+    # Count by type
+    type_counts = Counter(n["type"] for n in nodes)
+    lines.append("Component types:")
+    for t, c in type_counts.most_common():
+        lines.append(f"  {t}: {c}")
+    lines.append("")
+
+    # Count edge types
+    edge_counts = Counter(e["type"] for e in edges)
+    lines.append("Relationship types:")
+    for t, c in edge_counts.most_common():
+        lines.append(f"  {t}: {c}")
+    lines.append("")
+
+    # Highly-connected components (most edges)
+    edge_count_per_node: dict[str, int] = {}
+    for e in edges:
+        edge_count_per_node[e["source"]] = edge_count_per_node.get(e["source"], 0) + 1
+        edge_count_per_node[e["target"]] = edge_count_per_node.get(e["target"], 0) + 1
+
+    top_connected = sorted(edge_count_per_node.items(), key=lambda x: x[1], reverse=True)[:15]
+    if top_connected:
+        lines.append("Most connected components:")
+        for node_id, count in top_connected:
+            # Find the node type
+            node_type = ""
+            for n in nodes:
+                if n["id"] == node_id:
+                    node_type = f" [{n['type']}]"
+                    break
+            lines.append(f"  {node_id}{node_type}: {count} connections")
+        lines.append("")
+
+    # Key binaries (largest by size)
+    binaries = sorted(
+        [n for n in nodes if n["type"] == "binary"],
+        key=lambda n: n.get("size", 0),
+        reverse=True,
+    )[:10]
+    if binaries:
+        lines.append("Key binaries (by size):")
+        for b in binaries:
+            size_kb = b.get("size", 0) / 1024
+            lines.append(f"  {b['id']} ({size_kb:.1f}KB)")
+        lines.append("")
+
+    # Init scripts and what they start
+    starts_service_edges = [e for e in edges if e["type"] == "starts_service"]
+    if starts_service_edges:
+        lines.append("Service startup map:")
+        for e in starts_service_edges:
+            lines.append(f"  {e['source']} -> {e['target']}")
+
+    return "\n".join(lines)
+
+
 def register_filesystem_tools(registry: ToolRegistry) -> None:
     """Register all filesystem tools with the given registry."""
 
@@ -296,4 +409,22 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
             "required": ["file_type"],
         },
         handler=_handle_find_files_by_type,
+    )
+
+    registry.register(
+        name="get_component_map",
+        description=(
+            "Get a summary of the firmware's component dependency graph. "
+            "Shows component types (binaries, libraries, scripts, configs), "
+            "their relationships (library linking, function imports, script execution, "
+            "service startup), most connected components, and key binaries. "
+            "Use this to understand the firmware architecture at a high level "
+            "before diving into specific files."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        handler=_handle_get_component_map,
     )

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { FolderTree, PanelLeftClose, PanelLeftOpen, TerminalSquare } from 'lucide-react'
 import { useExplorerStore } from '@/stores/explorerStore'
 import { useChatStore } from '@/stores/chatStore'
@@ -10,8 +10,10 @@ import TerminalPanel from '@/components/explorer/TerminalPanel'
 
 export default function ExplorePage() {
   const { projectId } = useParams<{ projectId: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
   const resetExplorer = useExplorerStore((s) => s.reset)
   const loadDocuments = useExplorerStore((s) => s.loadDocuments)
+  const navigateToPath = useExplorerStore((s) => s.navigateToPath)
   const resetChat = useChatStore((s) => s.reset)
   const [chatOpen, setChatOpen] = useState(false)
   const [treeOpen, setTreeOpen] = useState(true)
@@ -29,6 +31,15 @@ export default function ExplorePage() {
       resetChat()
     }
   }, [projectId, loadDocuments, resetExplorer, resetChat])
+
+  // Handle ?path= query parameter: expand tree and select file
+  useEffect(() => {
+    const pathParam = searchParams.get('path')
+    if (!projectId || !pathParam) return
+    // Clear the query param so it doesn't re-trigger on re-renders
+    setSearchParams({}, { replace: true })
+    navigateToPath(projectId, pathParam)
+  }, [projectId, searchParams, setSearchParams, navigateToPath])
 
   const handleRequestChat = useCallback(() => {
     setChatOpen(true)

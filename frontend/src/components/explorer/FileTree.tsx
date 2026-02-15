@@ -85,6 +85,8 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     loadRootDirectory,
     loadDirectory,
     selectFile,
+    pendingNavPath,
+    clearPendingNavPath,
     documents,
     documentsLoading,
     selectedDocumentId,
@@ -127,6 +129,34 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
       setVisibleCount((prev) => (prev !== count ? count : prev))
     }, 0)
   }, [treeData])
+
+  // When navigateToPath finishes, open parent directories in the tree view and scroll to the node
+  useEffect(() => {
+    if (!pendingNavPath || !treeRef.current) return
+    clearPendingNavPath()
+
+    // Build list of parent directory IDs to open
+    const segments = pendingNavPath.split('/').filter(Boolean)
+    let path = ''
+    for (let i = 0; i < segments.length - 1; i++) {
+      path += '/' + segments[i]
+      treeRef.current.open(path)
+    }
+
+    // Scroll to and select the target node after a brief delay for tree to re-render
+    setTimeout(() => {
+      const tree = treeRef.current
+      if (!tree) return
+      const node = tree.get(pendingNavPath)
+      if (node) {
+        node.select()
+        tree.scrollTo(pendingNavPath)
+      }
+      // Update visible count
+      const count = tree.visibleNodes?.length ?? 0
+      setVisibleCount((prev) => (prev !== count ? count : prev))
+    }, 50)
+  }, [pendingNavPath, clearPendingNavPath])
 
   // Close context menu on click outside
   useEffect(() => {
