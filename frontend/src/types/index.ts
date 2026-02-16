@@ -442,6 +442,46 @@ export type ReviewSSEEvent =
   | { event: 'review_complete'; data: { review_id: string; status: ReviewStatus } }
   | { event: 'heartbeat'; data: Record<string, never> }
 
+// ── Emulation types ──
+
+export type EmulationMode = 'user' | 'system'
+export type EmulationStatus = 'created' | 'starting' | 'running' | 'stopped' | 'error'
+
+export interface PortForward {
+  host: number
+  guest: number
+}
+
+export interface EmulationSession {
+  id: string
+  project_id: string
+  firmware_id: string
+  mode: EmulationMode
+  status: EmulationStatus
+  architecture: string | null
+  binary_path: string | null
+  arguments: string | null
+  port_forwards: PortForward[]
+  error_message: string | null
+  started_at: string | null
+  stopped_at: string | null
+  created_at: string
+}
+
+export interface EmulationStartRequest {
+  mode: EmulationMode
+  binary_path?: string
+  arguments?: string
+  port_forwards?: PortForward[]
+}
+
+export interface EmulationExecResponse {
+  stdout: string
+  stderr: string
+  exit_code: number
+  timed_out: boolean
+}
+
 // ── Component Map types ──
 
 export type ComponentNodeType = 'binary' | 'library' | 'script' | 'config' | 'init_script'

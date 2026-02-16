@@ -31,6 +31,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        DOCKER_GID: "${DOCKER_GID:-999}"
     ports:
       - "8000:8000"
     env_file:
@@ -41,14 +43,34 @@ services:
       STORAGE_ROOT: /data/firmware
       GHIDRA_INSTALL_DIR: /opt/ghidra
       GHIDRA_SCRIPTS_PATH: /opt/ghidra_scripts
+      EMULATION_IMAGE: wairz-emulation
+      EMULATION_NETWORK: wairz_emulation_net
     volumes:
       - firmware_data:/data/firmware
       - ./ghidra/scripts:/opt/ghidra_scripts:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  emulation:
+    build:
+      context: ./emulation
+      dockerfile: Dockerfile
+    image: wairz-emulation
+    volumes:
+      - firmware_data:/data/firmware:ro
+      - ./emulation/kernels:/opt/kernels:ro
+    networks:
+      - default
+      - emulation_net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 
   frontend:
     build:
@@ -63,3 +85,7 @@ volumes:
   pgdata:
   redisdata:
   firmware_data:
+
+networks:
+  emulation_net:
+    internal: true

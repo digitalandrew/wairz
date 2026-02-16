@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     ghidra_scripts_path: str = "/opt/ghidra_scripts"
     ghidra_timeout: int = 120
     nvd_api_key: str = ""
+    emulation_timeout_minutes: int = 30
+    emulation_max_sessions: int = 3
+    emulation_memory_limit_mb: int = 512
+    emulation_cpu_limit: float = 1.0
+    emulation_image: str = "wairz-emulation"
+    emulation_network: str = "wairz_emulation_net"
     log_level: str = "INFO"
 
 

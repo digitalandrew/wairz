@@ -20,6 +20,7 @@ dependencies = [
     "pypdf>=4.0",
     "packageurl-python>=0.15.0",
     "nvdlib>=0.7.6",
+    "docker>=7.0.0",
 ]
 
 [tool.pytest.ini_options]

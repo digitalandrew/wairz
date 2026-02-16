@@ -53,8 +53,12 @@ RUN wget -q "https://github.com/NationalSecurityAgency/ghidra/releases/download/
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Create non-root user
-RUN useradd -m -s /bin/bash wairz
+# Create non-root user and add to docker group for emulation container management.
+# The docker socket GID from the host is passed via build arg (default 999).
+ARG DOCKER_GID=999
+RUN groupadd -g ${DOCKER_GID} docker || true \
+    && useradd -m -s /bin/bash wairz \
+    && usermod -aG docker wairz
 
 # Set up working directory
 WORKDIR /app
