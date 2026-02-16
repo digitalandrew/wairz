@@ -8,8 +8,8 @@ import { getMonacoLanguage } from '@/utils/fileIcons'
 import { registerAssemblyLanguage } from '@/utils/monacoAssembly'
 import { registerShellLanguage } from '@/utils/monacoShell'
 import { formatFileSize } from '@/utils/format'
-import { listFunctions, disassembleFunction, decompileFunction, cleanupCode } from '@/api/analysis'
-import type { FunctionInfo } from '@/types'
+import { listFunctions, listImports, disassembleFunction, decompileFunction, cleanupCode } from '@/api/analysis'
+import type { FunctionInfo, ImportInfo } from '@/types'
 import HexViewer from './HexViewer'
 import BinaryInfo from './BinaryInfo'
 
@@ -216,6 +216,7 @@ function BinaryTabs({
   infoLoading: boolean
 }) {
   const [functions, setFunctions] = useState<FunctionInfo[]>([])
+  const [imports, setImports] = useState<ImportInfo[]>([])
   const [functionsLoading, setFunctionsLoading] = useState(false)
   const [functionsLoaded, setFunctionsLoaded] = useState(false)
   const [selectedFunction, setSelectedFunction] = useState<string | null>(null)
@@ -233,6 +234,7 @@ function BinaryTabs({
   // Reset state when file changes
   useEffect(() => {
     setFunctions([])
+    setImports([])
     setFunctionsLoaded(false)
     setSelectedFunction(null)
     setDisasm(null)
@@ -250,9 +252,13 @@ function BinaryTabs({
       setActiveTab(tab)
       if (tab === 'functions' && !functionsLoaded && !functionsLoading && isElf) {
         setFunctionsLoading(true)
-        listFunctions(projectId, filePath)
-          .then((resp) => {
-            setFunctions(resp.functions)
+        Promise.all([
+          listFunctions(projectId, filePath),
+          listImports(projectId, filePath).catch(() => ({ imports: [] as ImportInfo[] })),
+        ])
+          .then(([funcResp, impResp]) => {
+            setFunctions(funcResp.functions)
+            setImports(impResp.imports)
             setFunctionsLoaded(true)
           })
           .catch(() => setFunctions([]))
@@ -328,6 +334,7 @@ function BinaryTabs({
         <TabsContent value="functions" className="flex-1 overflow-hidden mt-0 p-0">
           <FunctionListPanel
             functions={functions}
+            imports={imports}
             loading={functionsLoading}
             selectedFunction={selectedFunction}
             onSelectFunction={handleSelectFunction}
@@ -370,22 +377,41 @@ function BinaryTabs({
 
 function FunctionListPanel({
   functions,
+  imports,
   loading,
   selectedFunction,
   onSelectFunction,
 }: {
   functions: FunctionInfo[]
+  imports: ImportInfo[]
   loading: boolean
   selectedFunction: string | null
   onSelectFunction: (name: string) => void
 }) {
   const [filter, setFilter] = useState('')
 
+  // Build a lookup: function name → library name from imports
+  const importMap = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const imp of imports) {
+      if (imp.name && imp.libname) {
+        map.set(imp.name, imp.libname)
+      }
+    }
+    return map
+  }, [imports])
+
   const filtered = useMemo(() => {
     if (!filter) return functions
     const lower = filter.toLowerCase()
-    return functions.filter((f) => f.name.toLowerCase().includes(lower))
-  }, [functions, filter])
+    return functions.filter((f) => {
+      if (f.name.toLowerCase().includes(lower)) return true
+      // Also match on library name
+      const lib = importMap.get(f.name)
+      if (lib && lib.toLowerCase().includes(lower)) return true
+      return false
+    })
+  }, [functions, filter, importMap])
 
   if (loading) {
     return (
@@ -426,30 +452,37 @@ function FunctionListPanel({
             <thead className="sticky top-0 bg-background">
               <tr className="border-b border-border text-left text-muted-foreground">
                 <th className="px-4 py-1.5 font-medium">Function</th>
+                <th className="px-4 py-1.5 font-medium">Imported From</th>
                 <th className="px-4 py-1.5 font-medium text-right">Size</th>
                 <th className="px-4 py-1.5 font-medium text-right">Address</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((fn) => (
-                <tr
-                  key={fn.name}
-                  onClick={() => onSelectFunction(fn.name)}
-                  className={`cursor-pointer border-b border-border/50 ${
-                    fn.name === selectedFunction
-                      ? 'bg-accent text-accent-foreground'
-                      : 'hover:bg-accent/50'
-                  }`}
-                >
-                  <td className="px-4 py-1.5 font-mono">{fn.name}</td>
-                  <td className="px-4 py-1.5 text-right text-muted-foreground">
-                    {fn.size} B
-                  </td>
-                  <td className="px-4 py-1.5 text-right font-mono text-muted-foreground">
-                    0x{fn.offset.toString(16).padStart(8, '0')}
-                  </td>
-                </tr>
-              ))}
+              {filtered.map((fn) => {
+                const lib = importMap.get(fn.name)
+                return (
+                  <tr
+                    key={fn.name}
+                    onClick={() => onSelectFunction(fn.name)}
+                    className={`cursor-pointer border-b border-border/50 ${
+                      fn.name === selectedFunction
+                        ? 'bg-accent text-accent-foreground'
+                        : 'hover:bg-accent/50'
+                    }`}
+                  >
+                    <td className="px-4 py-1.5 font-mono">{fn.name}</td>
+                    <td className="px-4 py-1.5 font-mono text-muted-foreground">
+                      {lib ?? ''}
+                    </td>
+                    <td className="px-4 py-1.5 text-right text-muted-foreground">
+                      {fn.size} B
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-muted-foreground">
+                      0x{fn.offset.toString(16).padStart(8, '0')}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         )}

@@ -80,6 +80,16 @@ export interface FunctionListResponse {
   functions: FunctionInfo[]
 }
 
+export interface ImportInfo {
+  name: string
+  libname: string | null
+}
+
+export interface ImportsResponse {
+  binary_path: string
+  imports: ImportInfo[]
+}
+
 export interface DisassemblyResponse {
   binary_path: string
   function: string

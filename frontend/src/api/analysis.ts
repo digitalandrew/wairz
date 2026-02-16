@@ -1,6 +1,7 @@
 import apiClient from './client'
 import type {
   FunctionListResponse,
+  ImportsResponse,
   DisassemblyResponse,
   DecompilationResponse,
   BinaryInfoResponse,
@@ -13,6 +14,17 @@ export async function listFunctions(
 ): Promise<FunctionListResponse> {
   const { data } = await apiClient.get<FunctionListResponse>(
     `/projects/${projectId}/analysis/functions`,
+    { params: { path: binaryPath } },
+  )
+  return data
+}
+
+export async function listImports(
+  projectId: string,
+  binaryPath: string,
+): Promise<ImportsResponse> {
+  const { data } = await apiClient.get<ImportsResponse>(
+    `/projects/${projectId}/analysis/imports`,
     { params: { path: binaryPath } },
   )
   return data
