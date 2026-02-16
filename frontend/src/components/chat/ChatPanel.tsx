@@ -82,6 +82,17 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
       .finally(() => setInitializing(false))
   }, [isOpen, conversationId, projectId, initializing, setConversationId])
 
+  // Auto-send pending message when chat connects
+  useEffect(() => {
+    if (connectionStatus !== 'connected' || isStreaming) return
+    const msg = useChatStore.getState().consumePendingMessage()
+    if (!msg) return
+    const model = useChatStore.getState().selectedModel
+    useChatStore.getState().addUserMessage(msg)
+    sendMessage(msg, undefined, model)
+    autoScrollRef.current = true
+  }, [connectionStatus, isStreaming, sendMessage])
+
   // Auto-scroll logic
   useEffect(() => {
     const el = scrollRef.current

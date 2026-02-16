@@ -74,6 +74,7 @@ async def unpack(
         firmware.architecture = result.architecture
         firmware.endianness = result.endianness
         firmware.os_info = result.os_info
+        firmware.kernel_path = result.kernel_path
         firmware.unpack_log = result.unpack_log
         project.status = "ready"
     else:

@@ -18,6 +18,20 @@ if [ -z "$ARCH" ] || [ -z "$ROOTFS" ] || [ -z "$KERNEL" ]; then
     exit 1
 fi
 
+LOG="/tmp/qemu-system.log"
+
+if [ ! -f "$KERNEL" ]; then
+    echo "ERROR: Kernel not found: $KERNEL" | tee -a "$LOG" >&2
+    echo "System-mode emulation requires a pre-built kernel for the target architecture." | tee -a "$LOG" >&2
+    echo "Place kernel images in emulation/kernels/ (e.g., vmlinux-arm-versatile)." | tee -a "$LOG" >&2
+    exit 1
+fi
+
+if [ ! -d "$ROOTFS" ]; then
+    echo "ERROR: Rootfs directory not found: $ROOTFS" | tee -a "$LOG" >&2
+    exit 1
+fi
+
 SERIAL_SOCK="/tmp/qemu-serial.sock"
 
 # Build common QEMU args
@@ -77,7 +91,9 @@ case "$ARCH" in
         ;;
 esac
 
-# Launch QEMU
-echo "Starting QEMU system-mode: $QEMU_BIN"
-echo "Serial console: $SERIAL_SOCK"
-eval exec "$QEMU_BIN" $QEMU_ARGS
+# Launch QEMU — log output for diagnostics; use exec to replace shell
+echo "Starting QEMU system-mode: $QEMU_BIN" | tee -a "$LOG"
+echo "Serial console: $SERIAL_SOCK" | tee -a "$LOG"
+echo "Command: $QEMU_BIN $QEMU_ARGS" >> "$LOG"
+eval "$QEMU_BIN" $QEMU_ARGS >> "$LOG" 2>&1
+echo "QEMU exited with code $?" >> "$LOG"

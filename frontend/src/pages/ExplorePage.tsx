@@ -33,12 +33,21 @@ export default function ExplorePage() {
   }, [projectId, loadDocuments, resetExplorer, resetChat])
 
   // Handle ?path= query parameter: expand tree and select file
+  // Handle ?chat=1 query parameter: auto-open chat panel (used by cross-page AI help)
   useEffect(() => {
     const pathParam = searchParams.get('path')
-    if (!projectId || !pathParam) return
-    // Clear the query param so it doesn't re-trigger on re-renders
-    setSearchParams({}, { replace: true })
-    navigateToPath(projectId, pathParam)
+    const chatParam = searchParams.get('chat')
+    if (!projectId) return
+    if (pathParam) {
+      navigateToPath(projectId, pathParam)
+    }
+    if (chatParam) {
+      setChatOpen(true)
+    }
+    if (pathParam || chatParam) {
+      // Clear query params so they don't re-trigger on re-renders
+      setSearchParams({}, { replace: true })
+    }
   }, [projectId, searchParams, setSearchParams, navigateToPath])
 
   const handleRequestChat = useCallback(() => {

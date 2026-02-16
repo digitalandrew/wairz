@@ -5,12 +5,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import analysis, chat, component_map, documents, emulation, files, findings, firmware, projects, reviews, sbom, terminal
+from app.routers import analysis, chat, component_map, documents, emulation, files, findings, firmware, kernels, projects, reviews, sbom, terminal
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    os.makedirs(get_settings().storage_root, exist_ok=True)
+    settings = get_settings()
+    os.makedirs(settings.storage_root, exist_ok=True)
+    os.makedirs(settings.emulation_kernel_dir, exist_ok=True)
     yield
 
 
@@ -41,6 +43,7 @@ app.include_router(reviews.router)
 app.include_router(sbom.router)
 app.include_router(terminal.router)
 app.include_router(emulation.router)
+app.include_router(kernels.router)
 
 
 @app.get("/health")

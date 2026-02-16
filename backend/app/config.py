@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     emulation_memory_limit_mb: int = 512
     emulation_cpu_limit: float = 1.0
     emulation_image: str = "wairz-emulation"
+    emulation_kernel_dir: str = "/opt/kernels"
     emulation_network: str = "wairz_emulation_net"
     log_level: str = "INFO"
 

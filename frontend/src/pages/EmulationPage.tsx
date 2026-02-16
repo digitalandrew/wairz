@@ -24,6 +24,10 @@ import {
   getSessionStatus,
   buildEmulationTerminalURL,
 } from '@/api/emulation'
+import { getFirmware } from '@/api/firmware'
+import { useChatStore } from '@/stores/chatStore'
+import ChatPanel from '@/components/chat/ChatPanel'
+import KernelManager from '@/components/emulation/KernelManager'
 import type {
   EmulationSession,
   EmulationMode,
@@ -43,6 +47,9 @@ const STATUS_CONFIG: Record<EmulationStatus, { label: string; className: string 
 export default function EmulationPage() {
   const { projectId } = useParams<{ projectId: string }>()
 
+  const resetChat = useChatStore((s) => s.reset)
+  const [chatOpen, setChatOpen] = useState(false)
+
   const [sessions, setSessions] = useState<EmulationSession[]>([])
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
@@ -53,6 +60,11 @@ export default function EmulationPage() {
   const [binaryPath, setBinaryPath] = useState('')
   const [arguments_, setArguments] = useState('')
   const [portForwards, setPortForwards] = useState<PortForward[]>([])
+
+  // Kernel selection (system mode)
+  const [kernelName, setKernelName] = useState<string | null>(null)
+  const [firmwareArch, setFirmwareArch] = useState<string | null>(null)
+  const [firmwareKernelPath, setFirmwareKernelPath] = useState<string | null>(null)
 
   // Active session + terminal
   const [activeSession, setActiveSession] = useState<EmulationSession | null>(null)
@@ -78,7 +90,19 @@ export default function EmulationPage() {
 
   useEffect(() => {
     loadSessions()
-  }, [loadSessions])
+    return () => { resetChat() }
+  }, [loadSessions, resetChat])
+
+  // Fetch firmware architecture for kernel selection
+  useEffect(() => {
+    if (!projectId) return
+    getFirmware(projectId)
+      .then((fw) => {
+        setFirmwareArch(fw.architecture ?? null)
+        setFirmwareKernelPath(fw.kernel_path ?? null)
+      })
+      .catch(() => {})
+  }, [projectId])
 
   // Poll for status updates
   useEffect(() => {
@@ -106,6 +130,7 @@ export default function EmulationPage() {
         binary_path: mode === 'user' ? binaryPath.trim() : undefined,
         arguments: mode === 'user' && arguments_.trim() ? arguments_.trim() : undefined,
         port_forwards: mode === 'system' && portForwards.length > 0 ? portForwards : undefined,
+        kernel_name: mode === 'system' && kernelName ? kernelName : undefined,
       })
       setActiveSession(session)
       if (session.status === 'running') {
@@ -174,6 +199,10 @@ export default function EmulationPage() {
     updated[index] = { ...updated[index], [field]: value }
     setPortForwards(updated)
   }
+
+  const handleRequestChat = useCallback(() => {
+    setChatOpen(true)
+  }, [])
 
   if (loading) {
     return (
@@ -272,6 +301,14 @@ export default function EmulationPage() {
 
             {/* System mode fields */}
             {mode === 'system' && (
+              <>
+              <KernelManager
+                firmwareArchitecture={firmwareArch}
+                firmwareKernelPath={firmwareKernelPath}
+                onKernelSelect={setKernelName}
+                selectedKernel={kernelName}
+                onRequestChat={handleRequestChat}
+              />
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <label className="text-xs font-medium text-muted-foreground">
@@ -313,6 +350,7 @@ export default function EmulationPage() {
                   </div>
                 ))}
               </div>
+              </>
             )}
 
             {error && (
@@ -422,8 +460,8 @@ export default function EmulationPage() {
           </div>
         </div>
 
-        {/* Right panel — terminal */}
-        <div className="flex-1 bg-[#0a0a0b]">
+        {/* Center panel — terminal */}
+        <div className="relative flex-1 bg-[#0a0a0b]">
           {showTerminal && activeSession && projectId ? (
             <EmulationTerminal
               projectId={projectId}
@@ -441,7 +479,17 @@ export default function EmulationPage() {
               </div>
             </div>
           )}
+
+          {/* Chat toggle — bottom-right */}
+          {!chatOpen && (
+            <ChatPanel isOpen={false} onToggle={() => setChatOpen(true)} />
+          )}
         </div>
+
+        {/* Right panel — AI chat */}
+        {chatOpen && (
+          <ChatPanel isOpen={true} onToggle={() => setChatOpen(false)} />
+        )}
       </div>
     </div>
   )

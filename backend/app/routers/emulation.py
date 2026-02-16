@@ -59,6 +59,7 @@ async def start_emulation(
             binary_path=request.binary_path,
             arguments=request.arguments,
             port_forwards=[pf.model_dump() for pf in request.port_forwards],
+            kernel_name=request.kernel_name,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -189,7 +190,26 @@ async def websocket_emulation_terminal(
     if session.mode == "user":
         shell_cmd = EmulationService.build_user_shell_cmd(session.architecture or "arm")
     else:
-        shell_cmd = ["/bin/sh"]
+        # System mode: wait for QEMU serial socket, then connect via socat.
+        # The start-system-mode.sh script creates an ext4 rootfs image and
+        # launches QEMU with serial output on /tmp/qemu-serial.sock.
+        # Ext4 creation + QEMU startup can take a while, and the socket file
+        # may appear before QEMU is ready to accept connections, so we retry.
+        shell_cmd = [
+            "sh", "-c",
+            # Wait for socket file to appear (up to 90s — ext4 creation can be slow)
+            "for i in $(seq 1 90); do [ -S /tmp/qemu-serial.sock ] && break; sleep 1; done; "
+            # Retry socat connection (socket file may exist before QEMU is listening)
+            "for i in $(seq 1 15); do "
+            "  socat -,raw,echo=0 UNIX-CONNECT:/tmp/qemu-serial.sock 2>/dev/null && exit 0; "
+            "  sleep 2; "
+            "done; "
+            # All retries failed — show diagnostics
+            "echo 'Failed to connect to QEMU serial console.'; "
+            "echo '--- QEMU log ---'; "
+            "cat /tmp/qemu-system.log 2>/dev/null || echo 'No log file found.'; "
+            "sleep 5",
+        ]
 
     # Create an interactive exec instance
     exec_id = client.api.exec_create(

@@ -6,6 +6,7 @@ Uses the Docker SDK to spawn isolated containers running QEMU in user-mode
 
 import logging
 import os
+import shlex
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -85,6 +86,7 @@ class EmulationService:
         binary_path: str | None = None,
         arguments: str | None = None,
         port_forwards: list[dict] | None = None,
+        kernel_name: str | None = None,
     ) -> EmulationSession:
         """Start a new emulation session.
 
@@ -142,6 +144,8 @@ class EmulationService:
             container_id = await self._start_container(
                 session=session,
                 extracted_path=firmware.extracted_path,
+                kernel_name=kernel_name,
+                firmware_kernel_path=firmware.kernel_path,
             )
             session.container_id = container_id
             session.status = "running"
@@ -317,6 +321,8 @@ done
         self,
         session: EmulationSession,
         extracted_path: str,
+        kernel_name: str | None = None,
+        firmware_kernel_path: str | None = None,
     ) -> str:
         """Spawn a Docker container for this emulation session."""
         client = self._get_docker_client()
@@ -353,7 +359,11 @@ done
             if session.arguments:
                 cmd.extend(session.arguments.split())
         else:
-            kernel_path = self._find_kernel(session.architecture)
+            kernel_path = self._find_kernel(
+                session.architecture,
+                kernel_name=kernel_name,
+                firmware_kernel_path=firmware_kernel_path,
+            )
             pf_str = ""
             if session.port_forwards:
                 pf_str = ",".join(
@@ -400,6 +410,11 @@ done
             # chmod +x all files in typical binary directories.
             self._fix_firmware_permissions(container)
 
+            # For system mode, start QEMU in the background.
+            # cmd was built above with the start-system-mode.sh script + args.
+            if session.mode == "system":
+                container.exec_run(cmd, detach=True)
+
             # The container runs "sleep infinity" with firmware available.
             # Interaction happens via docker exec (terminal WS / exec_command).
             return container.id
@@ -426,19 +441,59 @@ done
             # Fix permissions — binwalk extraction may lose execute bits.
             self._fix_firmware_permissions(container)
 
+            # For system mode, start QEMU in the background.
+            if session.mode == "system":
+                container.exec_run(cmd, detach=True)
+
             return container.id
 
-    def _find_kernel(self, arch: str | None) -> str:
-        """Find a pre-built kernel for system-mode emulation."""
-        kernel_map = {
-            "arm": "/opt/kernels/vmlinux-arm-versatile",
-            "mips": "/opt/kernels/vmlinux-mips-malta",
-            "mipsel": "/opt/kernels/vmlinux-mipsel-malta",
-            "x86": "/opt/kernels/vmlinux-x86",
-            "x86_64": "/opt/kernels/vmlinux-x86",
-        }
-        kernel = kernel_map.get(arch or "arm", "/opt/kernels/vmlinux-arm-versatile")
-        return kernel
+    def _find_kernel(
+        self,
+        arch: str | None,
+        kernel_name: str | None = None,
+        firmware_kernel_path: str | None = None,
+    ) -> str:
+        """Find a kernel for system-mode emulation.
+
+        Priority order:
+        1. Explicit kernel_name (user-specified from kernel management)
+        2. Kernel extracted from the firmware during unpacking
+        3. Pre-built kernels in emulation_kernel_dir (matching architecture)
+        """
+        from app.services.kernel_service import KernelService
+
+        kernel_dir = self._settings.emulation_kernel_dir
+
+        # 1) User-specified kernel from the kernel management system
+        if kernel_name:
+            if "/" in kernel_name or "\\" in kernel_name or ".." in kernel_name:
+                raise ValueError(f"Invalid kernel name: {kernel_name}")
+            kernel_path = os.path.join(kernel_dir, kernel_name)
+            if not os.path.isfile(kernel_path):
+                raise ValueError(
+                    f"Kernel '{kernel_name}' not found in {kernel_dir}. "
+                    "Upload a kernel via the kernel management API."
+                )
+            return kernel_path
+
+        # 2) Kernel extracted from the firmware itself
+        if firmware_kernel_path and os.path.isfile(firmware_kernel_path):
+            logger.info("Using kernel extracted from firmware: %s", firmware_kernel_path)
+            return firmware_kernel_path
+
+        # 3) Pre-built kernel from the kernel management directory
+        svc = KernelService()
+        match = svc.find_kernel_for_arch(arch or "arm")
+        if match:
+            return os.path.join(kernel_dir, match["name"])
+
+        raise ValueError(
+            f"No kernel available for architecture '{arch or 'arm'}'. "
+            "System-mode emulation requires a pre-built Linux kernel. "
+            "A kernel was not found in the firmware image. "
+            "Upload one via the kernel management page or API "
+            "(GET/POST /api/v1/kernels)."
+        )
 
     @staticmethod
     def build_user_shell_cmd(arch: str) -> list[str]:
@@ -517,9 +572,13 @@ done
                 "/firmware/bin/sh", "-c", command,
             ]
         else:
+            # System mode: send command through QEMU's serial console socket.
+            # This is inherently messy (serial console mixes prompts/output),
+            # but it executes inside the emulated firmware instead of the
+            # host container.
             exec_cmd = [
-                "timeout", str(timeout),
-                "sh", "-c", command,
+                "sh", "-c",
+                f"echo {shlex.quote(command)} | timeout {timeout} socat - UNIX-CONNECT:/tmp/qemu-serial.sock",
             ]
 
         try:

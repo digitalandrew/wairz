@@ -27,5 +27,6 @@ class FirmwareDetailResponse(BaseModel):
     architecture: str | None
     endianness: str | None
     os_info: str | None
+    kernel_path: str | None
     unpack_log: str | None
     created_at: datetime

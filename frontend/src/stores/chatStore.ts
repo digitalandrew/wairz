@@ -21,6 +21,8 @@ interface ChatState {
   currentAssistantTextId: string | null
   /** Selected AI model ID */
   selectedModel: string
+  /** A message queued from another page to be auto-sent when chat connects */
+  pendingMessage: string | null
 }
 
 interface ChatActions {
@@ -37,6 +39,8 @@ interface ChatActions {
   addToolResult: (tool: string, toolUseId: string, output: string, isError?: boolean) => void
   addError: (content: string) => void
   setSelectedModel: (model: string) => void
+  setPendingMessage: (message: string | null) => void
+  consumePendingMessage: () => string | null
   startStreaming: () => void
   stopStreaming: () => void
   reset: () => void
@@ -52,6 +56,7 @@ const initialState: ChatState = {
   currentTextAccumulator: '',
   currentAssistantTextId: null,
   selectedModel: DEFAULT_MODEL,
+  pendingMessage: null,
 }
 
 export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
@@ -135,8 +140,15 @@ export const useChatStore = create<ChatState & ChatActions>((set, get) => ({
 
   setSelectedModel: (model) => set({ selectedModel: model }),
 
+  setPendingMessage: (message) => set({ pendingMessage: message }),
+  consumePendingMessage: () => {
+    const msg = get().pendingMessage
+    if (msg) set({ pendingMessage: null })
+    return msg
+  },
+
   startStreaming: () => set({ isStreaming: true, error: null }),
   stopStreaming: () => set({ isStreaming: false }),
 
-  reset: () => set(initialState),
+  reset: () => set((s) => ({ ...initialState, pendingMessage: s.pendingMessage })),
 }))

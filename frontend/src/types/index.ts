@@ -19,6 +19,7 @@ export interface FirmwareSummary {
   architecture: string | null
   endianness: string | null
   os_info: string | null
+  kernel_path: string | null
   created_at: string
 }
 
@@ -473,6 +474,22 @@ export interface EmulationStartRequest {
   binary_path?: string
   arguments?: string
   port_forwards?: PortForward[]
+  kernel_name?: string
+}
+
+// ── Kernel types ──
+
+export interface KernelInfo {
+  name: string
+  architecture: string
+  description: string
+  file_size: number
+  uploaded_at: string
+}
+
+export interface KernelListResponse {
+  kernels: KernelInfo[]
+  total: number
 }
 
 export interface EmulationExecResponse {

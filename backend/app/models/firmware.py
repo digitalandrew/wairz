@@ -27,6 +27,7 @@ class Firmware(Base):
     architecture: Mapped[str | None] = mapped_column(String(50))
     endianness: Mapped[str | None] = mapped_column(String(10))
     os_info: Mapped[str | None] = mapped_column(Text)
+    kernel_path: Mapped[str | None] = mapped_column(String(512))
     unpack_log: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

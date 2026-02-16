@@ -15,6 +15,7 @@ class EmulationStartRequest(BaseModel):
     binary_path: str | None = None
     arguments: str | None = None
     port_forwards: list[PortForward] = []
+    kernel_name: str | None = None
 
 
 class EmulationSessionResponse(BaseModel):

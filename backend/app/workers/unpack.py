@@ -12,6 +12,7 @@ class UnpackResult:
     architecture: str | None = None
     endianness: str | None = None
     os_info: str | None = None
+    kernel_path: str | None = None
     unpack_log: str = ""
     success: bool = False
     error: str | None = None
@@ -127,6 +128,131 @@ def detect_os_info(fs_root: str) -> str | None:
     return None
 
 
+def _read_magic(path: str, num_bytes: int = 4) -> bytes:
+    """Read the first N bytes of a file for magic number detection."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(num_bytes)
+    except OSError:
+        return b""
+
+
+# Known filesystem root directory names produced by binwalk extraction
+_FS_ROOT_NAMES = frozenset({
+    "ext-root", "squash-root", "squashfs-root", "ubifs-root",
+    "cpio-root", "jffs2-root", "cramfs-root", "romfs-root",
+})
+
+# Filename patterns that strongly indicate a kernel image
+_KERNEL_NAME_PATTERNS = ("vmlinux", "zimage", "uimage", "bzimage")
+
+
+def detect_kernel(extraction_dir: str, fs_root: str | None) -> str | None:
+    """Scan the extraction directory for a kernel image.
+
+    Kernels extracted by binwalk appear as siblings to the filesystem root
+    in the .extracted/ directory — they are NOT inside the filesystem.
+
+    Returns the absolute path to the best kernel candidate, or None.
+    """
+    # The parent of the filesystem root is the binwalk extraction output dir
+    # (e.g., /data/.../extracted/_firmware.img.extracted/)
+    if fs_root:
+        scan_dir = os.path.dirname(fs_root)
+    else:
+        # No filesystem root found — scan all .extracted/ subdirectories
+        scan_dir = extraction_dir
+
+    if not os.path.isdir(scan_dir):
+        return None
+
+    candidates: list[tuple[str, int]] = []  # (path, priority)
+
+    for entry in os.scandir(scan_dir):
+        if not entry.is_file(follow_symlinks=False):
+            continue
+
+        name_lower = entry.name.lower()
+
+        # Skip filesystem images and known roots
+        if name_lower in _FS_ROOT_NAMES:
+            continue
+        # Skip JSON sidecar files and very small files
+        if name_lower.endswith(".json") or name_lower.endswith(".txt"):
+            continue
+
+        try:
+            file_size = entry.stat().st_size
+        except OSError:
+            continue
+
+        # Kernels are typically > 500 KB
+        if file_size < 500_000:
+            continue
+
+        # 1) Check filename patterns (highest priority)
+        if any(p in name_lower for p in _KERNEL_NAME_PATTERNS):
+            candidates.append((entry.path, 100))
+            continue
+
+        # 2) Check magic bytes
+        magic = _read_magic(entry.path, 4)
+
+        # ELF binary — could be an uncompressed vmlinux
+        if magic == b"\x7fELF":
+            # Verify it's an executable (not a shared library from extraction)
+            try:
+                with open(entry.path, "rb") as f:
+                    elf = ELFFile(f)
+                    # Kernel ELFs are ET_EXEC (type 2) and very large
+                    if elf.header.e_type == "ET_EXEC" and file_size > 1_000_000:
+                        candidates.append((entry.path, 95))
+                        continue
+            except Exception:
+                pass
+
+        # U-Boot uImage header
+        if magic == b"\x27\x05\x19\x56":
+            candidates.append((entry.path, 90))
+            continue
+
+        # ARM Linux zImage magic at offset 0x24: 0x016f2818
+        if file_size > 1_000_000:
+            try:
+                with open(entry.path, "rb") as f:
+                    f.seek(0x24)
+                    arm_magic = f.read(4)
+                    if arm_magic == b"\x18\x28\x6f\x01":
+                        candidates.append((entry.path, 92))
+                        continue
+            except OSError:
+                pass
+
+        # gzip-compressed (possibly compressed kernel)
+        if magic[:2] == b"\x1f\x8b" and file_size > 1_000_000:
+            candidates.append((entry.path, 70))
+            continue
+
+        # LZMA-compressed
+        if magic[:3] == b"\x5d\x00\x00" and file_size > 1_000_000:
+            candidates.append((entry.path, 70))
+            continue
+
+        # Large file with hex-address name (binwalk offset naming)
+        # e.g., "4093B8", "1000000"
+        stripped = entry.name.split(".")[0]
+        if all(c in "0123456789ABCDEFabcdef" for c in stripped) and len(stripped) >= 4:
+            if file_size > 1_000_000:
+                candidates.append((entry.path, 60))
+
+    if not candidates:
+        return None
+
+    # Return highest-priority candidate
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    return candidates[0][0]
+
+
 async def unpack_firmware(firmware_path: str, output_base_dir: str) -> UnpackResult:
     """Orchestrate the full unpacking pipeline."""
     result = UnpackResult()
@@ -159,6 +285,9 @@ async def unpack_firmware(firmware_path: str, output_base_dir: str) -> UnpackRes
 
     # Step 4: Detect OS info
     result.os_info = detect_os_info(fs_root)
+
+    # Step 5: Detect kernel image
+    result.kernel_path = detect_kernel(extraction_dir, fs_root)
 
     result.success = True
     return result

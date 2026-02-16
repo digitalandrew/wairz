@@ -1,7 +1,7 @@
 """Emulation AI tools for dynamic firmware analysis.
 
 Tools for starting/stopping QEMU emulation sessions, executing commands
-in running sessions, and checking session status.
+in running sessions, checking session status, and listing available kernels.
 """
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.models.emulation_session import EmulationSession
 from app.models.firmware import Firmware
 from app.services.emulation_service import EmulationService
+from app.services.kernel_service import KernelService
 
 from sqlalchemy import select
 
@@ -17,12 +18,39 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
     """Register all emulation tools with the given registry."""
 
     registry.register(
+        name="list_available_kernels",
+        description=(
+            "List pre-built Linux kernels available for system-mode emulation. "
+            "System mode REQUIRES a kernel matching the firmware architecture. "
+            "Use this tool to check what kernels are available before starting "
+            "system-mode emulation. If no kernel matches, advise the user to "
+            "upload one via the kernel management page."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "architecture": {
+                    "type": "string",
+                    "description": (
+                        "Optional architecture filter (arm, aarch64, mips, mipsel, x86, x86_64). "
+                        "If omitted, lists all kernels."
+                    ),
+                },
+            },
+        },
+        handler=_handle_list_kernels,
+    )
+
+    registry.register(
         name="start_emulation",
         description=(
             "Start a QEMU-based emulation session for dynamic firmware analysis. "
             "User mode runs a single binary in a chroot (fast, good for testing "
             "specific programs). System mode boots the full firmware OS (slower, "
             "good for testing services and network behavior). "
+            "For system mode, use list_available_kernels first to check that a "
+            "matching kernel is available. You can specify kernel_name to select "
+            "a specific kernel. "
             "Use emulation to VALIDATE static findings: test if default credentials "
             "work, check if services are accessible, verify network behavior. "
             "Always stop sessions when done to free resources."
@@ -54,6 +82,13 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
                         "required": ["host", "guest"],
                     },
                     "description": "Port forwarding rules (system mode, e.g., [{host: 8080, guest: 80}])",
+                },
+                "kernel_name": {
+                    "type": "string",
+                    "description": (
+                        "Name of a specific kernel to use (from list_available_kernels). "
+                        "If omitted, auto-selects a kernel matching the firmware architecture."
+                    ),
                 },
             },
             "required": ["mode"],
@@ -135,12 +170,45 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _handle_list_kernels(input: dict, context: ToolContext) -> str:
+    """List available kernels for system-mode emulation."""
+    architecture = input.get("architecture")
+
+    svc = KernelService()
+    kernels = svc.list_kernels(architecture=architecture)
+
+    if not kernels:
+        arch_msg = f" for architecture '{architecture}'" if architecture else ""
+        return (
+            f"No kernels available{arch_msg}.\n\n"
+            "System-mode emulation requires a pre-built Linux kernel matching the "
+            "firmware's architecture. The user needs to upload a kernel via the "
+            "Emulation page's kernel management section.\n\n"
+            "Common kernel sources:\n"
+            "- OpenWrt downloads (https://downloads.openwrt.org/) — pre-built kernels for ARM, MIPS\n"
+            "- Buildroot — custom kernel builds for any architecture\n"
+            "- Debian cross-compiled kernel packages (linux-image-*)\n"
+            "- QEMU test kernels from various Linux distribution repos\n\n"
+            "Advise the user to upload a kernel matching the firmware architecture, "
+            "then retry system-mode emulation."
+        )
+
+    lines = [f"Available kernels ({len(kernels)}):\n"]
+    for k in kernels:
+        size_mb = k["file_size"] / (1024 * 1024)
+        desc = f" — {k['description']}" if k.get("description") else ""
+        lines.append(f"  {k['name']} [{k['architecture']}] ({size_mb:.1f} MB){desc}")
+
+    return "\n".join(lines)
+
+
 async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
     """Start an emulation session."""
     mode = input.get("mode", "user")
     binary_path = input.get("binary_path")
     arguments = input.get("arguments")
     port_forwards = input.get("port_forwards", [])
+    kernel_name = input.get("kernel_name")
 
     if mode == "user" and not binary_path:
         return "Error: binary_path is required for user-mode emulation."
@@ -161,6 +229,7 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
             binary_path=binary_path,
             arguments=arguments,
             port_forwards=port_forwards,
+            kernel_name=kernel_name,
         )
         await context.db.commit()
     except ValueError as exc:
