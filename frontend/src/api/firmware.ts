@@ -39,7 +39,7 @@ export async function unpackFirmware(
   const { data } = await apiClient.post<FirmwareDetail>(
     `/projects/${projectId}/firmware/unpack`,
     null,
-    { timeout: 120_000 },
+    { timeout: 600_000 },
   )
   return data
 }

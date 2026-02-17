@@ -235,6 +235,26 @@ class EmulationService:
         container.put_archive(dst_path, tar_stream)
 
     @staticmethod
+    def _copy_file_to_container(
+        container: "docker.models.containers.Container",
+        src_path: str,
+        dst_path: str,
+    ) -> None:
+        """Copy a single file into a running container using put_archive."""
+        import io
+        import tarfile
+
+        dst_dir = os.path.dirname(dst_path)
+        dst_name = os.path.basename(dst_path)
+
+        tar_stream = io.BytesIO()
+        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+            tar.add(src_path, arcname=dst_name)
+        tar_stream.seek(0)
+
+        container.put_archive(dst_dir, tar_stream)
+
+    @staticmethod
     def _fix_firmware_permissions(
         container: "docker.models.containers.Container",
     ) -> None:
@@ -348,7 +368,16 @@ done
                 if guest and host_:
                     port_bindings[f"{guest}/tcp"] = [{"HostPort": str(host_)}]
 
-        # Build the command for the container
+        # Resolve kernel path for system mode (backend-side path)
+        kernel_backend_path = None
+        if session.mode == "system":
+            kernel_backend_path = self._find_kernel(
+                session.architecture,
+                kernel_name=kernel_name,
+                firmware_kernel_path=firmware_kernel_path,
+            )
+
+        # Build the command for the container (kernel path will be updated below)
         if session.mode == "user":
             cmd = [
                 "/opt/scripts/start-user-mode.sh",
@@ -358,24 +387,15 @@ done
             ]
             if session.arguments:
                 cmd.extend(session.arguments.split())
-        else:
-            kernel_path = self._find_kernel(
-                session.architecture,
-                kernel_name=kernel_name,
-                firmware_kernel_path=firmware_kernel_path,
-            )
-            pf_str = ""
-            if session.port_forwards:
-                pf_str = ",".join(
-                    f"{pf['host']}:{pf['guest']}" for pf in session.port_forwards
-                )
-            cmd = [
-                "/opt/scripts/start-system-mode.sh",
-                session.architecture or "arm",
-                "/firmware",
-                kernel_path,
-                pf_str,
-            ]
+
+        # Container-internal path where the kernel will be placed
+        CONTAINER_KERNEL_PATH = "/tmp/kernel"
+
+        common_labels = {
+            "wairz.session_id": str(session.id),
+            "wairz.project_id": str(session.project_id),
+            "wairz.mode": session.mode,
+        }
 
         if use_docker_cp:
             # Create container with "sleep infinity" so we can copy files via SDK.
@@ -388,11 +408,7 @@ done
                 nano_cpus=int(settings.emulation_cpu_limit * 1e9),
                 privileged=False,
                 network_mode="bridge",
-                labels={
-                    "wairz.session_id": str(session.id),
-                    "wairz.project_id": str(session.project_id),
-                    "wairz.mode": session.mode,
-                },
+                labels=common_labels,
             )
 
             # Create /firmware dir, then copy the extracted filesystem into it
@@ -407,17 +423,7 @@ done
                 raise RuntimeError(f"Failed to copy firmware to emulation container: {exc}")
 
             # Fix permissions — binwalk extraction may lose execute bits.
-            # chmod +x all files in typical binary directories.
             self._fix_firmware_permissions(container)
-
-            # For system mode, start QEMU in the background.
-            # cmd was built above with the start-system-mode.sh script + args.
-            if session.mode == "system":
-                container.exec_run(cmd, detach=True)
-
-            # The container runs "sleep infinity" with firmware available.
-            # Interaction happens via docker exec (terminal WS / exec_command).
-            return container.id
 
         else:
             # Standard bind mount — host path is available
@@ -431,21 +437,33 @@ done
                 nano_cpus=int(settings.emulation_cpu_limit * 1e9),
                 privileged=False,
                 network_mode="bridge",
-                labels={
-                    "wairz.session_id": str(session.id),
-                    "wairz.project_id": str(session.project_id),
-                    "wairz.mode": session.mode,
-                },
+                labels=common_labels,
             )
 
             # Fix permissions — binwalk extraction may lose execute bits.
             self._fix_firmware_permissions(container)
 
-            # For system mode, start QEMU in the background.
-            if session.mode == "system":
-                container.exec_run(cmd, detach=True)
+        # For system mode, copy the kernel into the container and launch QEMU
+        if session.mode == "system" and kernel_backend_path:
+            self._copy_file_to_container(
+                container, kernel_backend_path, CONTAINER_KERNEL_PATH,
+            )
 
-            return container.id
+            pf_str = ""
+            if session.port_forwards:
+                pf_str = ",".join(
+                    f"{pf['host']}:{pf['guest']}" for pf in session.port_forwards
+                )
+            cmd = [
+                "/opt/scripts/start-system-mode.sh",
+                session.architecture or "arm",
+                "/firmware",
+                CONTAINER_KERNEL_PATH,
+                pf_str,
+            ]
+            container.exec_run(cmd, detach=True)
+
+        return container.id
 
     def _find_kernel(
         self,

@@ -3,11 +3,16 @@ FROM python:3.12-slim AS base
 # Install system dependencies for firmware analysis
 RUN apt-get update && apt-get install -y --no-install-recommends \
     binwalk \
+    sleuthkit \
     squashfs-tools \
+    cramfsswap \
     mtd-utils \
     e2fsprogs \
     cpio \
     p7zip-full \
+    cabextract \
+    lzop \
+    srecord \
     file \
     libmagic1 \
     build-essential \
@@ -24,17 +29,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Python-based firmware extraction tools used by binwalk
+RUN pip3 install --no-cache-dir --break-system-packages \
+    jefferson \
+    ubi_reader \
+    && pip3 install --no-cache-dir --break-system-packages \
+       git+https://github.com/devttys0/yaffshiv.git 2>/dev/null \
+    || echo "WARN: yaffshiv install failed — YAFFS extraction won't work"
+
 # Install radare2 from GitHub releases (not in Debian Trixie repos)
 RUN curl -fsSL https://github.com/radareorg/radare2/releases/download/5.9.8/radare2_5.9.8_amd64.deb -o /tmp/radare2.deb \
     && dpkg -i /tmp/radare2.deb || apt-get install -f -y \
     && rm /tmp/radare2.deb
 
-# Install sasquatch for non-standard SquashFS (ignore build errors — best-effort)
+# Install sasquatch for non-standard SquashFS (vendor-modified)
+# Try the devttys0 fork first; patch out -Werror to handle newer compiler warnings
 RUN git clone https://github.com/devttys0/sasquatch.git /tmp/sasquatch \
     && cd /tmp/sasquatch \
-    && sed -i 's/-Werror//g' squashfs-tools/Makefile patches/*.patch 2>/dev/null; \
-    ./build.sh || true \
-    && rm -rf /tmp/sasquatch
+    && sed -i 's/-Werror//g' squashfs-tools/Makefile patches/*.patch 2>/dev/null \
+    && sed -i 's/-Wall -Werror/-Wall/g' squashfs-tools/Makefile 2>/dev/null; \
+    cd /tmp/sasquatch && ./build.sh 2>/dev/null \
+    && cp /usr/local/bin/sasquatch /usr/local/bin/sasquatch 2>/dev/null; \
+    rm -rf /tmp/sasquatch; \
+    which sasquatch || echo "WARN: sasquatch build failed — non-standard SquashFS won't extract"
 
 # Install OpenJDK 21 for Ghidra (JDK 17 not available in Trixie)
 RUN apt-get update && apt-get install -y --no-install-recommends \

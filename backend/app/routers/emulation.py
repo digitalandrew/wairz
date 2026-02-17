@@ -197,18 +197,34 @@ async def websocket_emulation_terminal(
         # may appear before QEMU is ready to accept connections, so we retry.
         shell_cmd = [
             "sh", "-c",
-            # Wait for socket file to appear (up to 90s — ext4 creation can be slow)
-            "for i in $(seq 1 90); do [ -S /tmp/qemu-serial.sock ] && break; sleep 1; done; "
+            # Wait for socket file to appear (up to 120s — ext4 creation can be slow)
+            "echo 'Waiting for QEMU to start...'; "
+            "for i in $(seq 1 120); do "
+            "  [ -S /tmp/qemu-serial.sock ] && break; "
+            "  if [ $((i % 10)) -eq 0 ]; then echo \"  still waiting... (${i}s)\"; fi; "
+            "  sleep 1; "
+            "done; "
+            "if [ ! -S /tmp/qemu-serial.sock ]; then "
+            "  echo ''; echo 'ERROR: QEMU serial socket not found after 120s.'; "
+            "  echo ''; echo '--- QEMU startup log ---'; "
+            "  cat /tmp/qemu-system.log 2>/dev/null || echo 'No log file found.'; "
+            "  echo ''; echo 'The kernel may not be compatible with this QEMU machine type.'; "
+            "  echo 'Try uploading a kernel built for QEMU (e.g., from OpenWrt or Buildroot).'; "
+            "  sleep 30; exit 1; "
+            "fi; "
             # Retry socat connection (socket file may exist before QEMU is listening)
             "for i in $(seq 1 15); do "
             "  socat -,raw,echo=0 UNIX-CONNECT:/tmp/qemu-serial.sock 2>/dev/null && exit 0; "
             "  sleep 2; "
             "done; "
             # All retries failed — show diagnostics
-            "echo 'Failed to connect to QEMU serial console.'; "
-            "echo '--- QEMU log ---'; "
+            "echo ''; echo 'Failed to connect to QEMU serial console.'; "
+            "echo ''; echo '--- QEMU startup log ---'; "
             "cat /tmp/qemu-system.log 2>/dev/null || echo 'No log file found.'; "
-            "sleep 5",
+            "echo ''; echo 'QEMU started but the kernel may have crashed immediately.'; "
+            "echo 'Firmware kernels are often incompatible with generic QEMU machine types.'; "
+            "echo 'Upload a kernel built for QEMU (e.g., from OpenWrt or Buildroot).'; "
+            "sleep 30",
         ]
 
     # Create an interactive exec instance

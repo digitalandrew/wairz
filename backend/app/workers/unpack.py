@@ -32,7 +32,7 @@ _ELF_ARCH_MAP = {
 }
 
 
-async def run_binwalk_extraction(firmware_path: str, output_dir: str, timeout: int = 300) -> str:
+async def run_binwalk_extraction(firmware_path: str, output_dir: str, timeout: int = 600) -> str:
     """Run binwalk -e to extract firmware contents. Returns stdout+stderr."""
     proc = await asyncio.create_subprocess_exec(
         "binwalk", "-e", "-C", output_dir, firmware_path,
@@ -146,6 +146,18 @@ _FS_ROOT_NAMES = frozenset({
 # Filename patterns that strongly indicate a kernel image
 _KERNEL_NAME_PATTERNS = ("vmlinux", "zimage", "uimage", "bzimage")
 
+# File extensions for filesystem images — NOT kernels
+_FS_IMAGE_EXTENSIONS = frozenset({
+    ".ext", ".ext2", ".ext3", ".ext4",
+    ".yaffs", ".yaffs2",
+    ".jffs2",
+    ".squashfs", ".sqfs",
+    ".cramfs",
+    ".ubifs", ".ubi",
+    ".romfs",
+    ".cpio",
+})
+
 
 def detect_kernel(extraction_dir: str, fs_root: str | None) -> str | None:
     """Scan the extraction directory for a kernel image.
@@ -179,6 +191,10 @@ def detect_kernel(extraction_dir: str, fs_root: str | None) -> str | None:
             continue
         # Skip JSON sidecar files and very small files
         if name_lower.endswith(".json") or name_lower.endswith(".txt"):
+            continue
+        # Skip filesystem image files (ext2, yaffs, jffs2, etc.)
+        _, ext = os.path.splitext(name_lower)
+        if ext in _FS_IMAGE_EXTENSIONS:
             continue
 
         try:
