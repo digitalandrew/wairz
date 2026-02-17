@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bridge-utils \
     e2fsprogs \
     kpartx \
+    xxd \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy helper scripts

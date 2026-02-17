@@ -254,13 +254,6 @@ def detect_kernel(extraction_dir: str, fs_root: str | None) -> str | None:
             candidates.append((entry.path, 70))
             continue
 
-        # Large file with hex-address name (binwalk offset naming)
-        # e.g., "4093B8", "1000000"
-        stripped = entry.name.split(".")[0]
-        if all(c in "0123456789ABCDEFabcdef" for c in stripped) and len(stripped) >= 4:
-            if file_size > 1_000_000:
-                candidates.append((entry.path, 60))
-
     if not candidates:
         return None
 

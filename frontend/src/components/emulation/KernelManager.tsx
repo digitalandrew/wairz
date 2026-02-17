@@ -164,10 +164,11 @@ export default function KernelManager({
 
       {/* Firmware-extracted kernel indicator */}
       {firmwareKernelPath && (
-        <div className="flex items-start gap-2 rounded-md bg-green-500/10 px-3 py-2 text-xs text-green-600 dark:text-green-400">
-          <HardDrive className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <div className="flex items-start gap-2 rounded-md bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600 dark:text-yellow-400">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <div>
-            Kernel detected in firmware. It will be used automatically if no other kernel is selected.
+            Kernel detected in firmware, but it may not be compatible with QEMU machine types.
+            If system-mode emulation fails, upload a QEMU-compatible kernel below.
           </div>
         </div>
       )}

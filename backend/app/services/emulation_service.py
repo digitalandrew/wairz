@@ -54,6 +54,65 @@ ARCH_ALIASES: dict[str, str] = {
 }
 
 
+def _validate_kernel_file(path: str) -> tuple[bool, str]:
+    """Check whether a file looks like a valid kernel image by inspecting magic bytes.
+
+    Returns (is_valid, reason) where reason describes what was detected or
+    why the file was rejected.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False, "file not found or unreadable"
+
+    if size < 500_000:
+        return False, f"too small ({size} bytes) — kernels are typically >500KB"
+
+    try:
+        with open(path, "rb") as f:
+            header = f.read(64)
+    except OSError:
+        return False, "unable to read file"
+
+    if len(header) < 4:
+        return False, "file too short to identify"
+
+    # ELF — must be ET_EXEC (vmlinux), not ET_DYN (shared lib)
+    if header[:4] == b"\x7fELF":
+        # e_type is at offset 16 (2 bytes). ET_EXEC = 2
+        if len(header) >= 18:
+            # Check both endiannesses (EI_DATA at offset 5: 1=LE, 2=BE)
+            ei_data = header[5]
+            if ei_data == 1:  # little-endian
+                e_type = int.from_bytes(header[16:18], "little")
+            else:
+                e_type = int.from_bytes(header[16:18], "big")
+            if e_type == 2:
+                return True, "ELF executable (vmlinux)"
+            return False, f"ELF file but type={e_type} (not ET_EXEC=2) — likely a shared library or firmware image"
+        return False, "ELF header too short"
+
+    # U-Boot uImage
+    if header[:4] == b"\x27\x05\x19\x56":
+        return True, "U-Boot uImage"
+
+    # ARM zImage — magic at offset 0x24: 0x016f2818 (little-endian)
+    if len(header) >= 0x28:
+        arm_magic = header[0x24:0x28]
+        if arm_magic == b"\x18\x28\x6f\x01":
+            return True, "ARM zImage"
+
+    # gzip-compressed (common for compressed kernels)
+    if header[:2] == b"\x1f\x8b" and size > 500_000:
+        return True, "gzip-compressed (possibly vmlinuz)"
+
+    # LZMA-compressed
+    if header[:3] == b"\x5d\x00\x00" and size > 500_000:
+        return True, "LZMA-compressed (possibly vmlinuz)"
+
+    return False, "unrecognized format — not ELF/uImage/zImage/gzip/LZMA"
+
+
 class EmulationService:
     """Manages QEMU emulation session lifecycle via Docker containers."""
 
@@ -444,7 +503,17 @@ done
             self._fix_firmware_permissions(container)
 
         # For system mode, copy the kernel into the container and launch QEMU
-        if session.mode == "system" and kernel_backend_path:
+        if session.mode == "system":
+            if not kernel_backend_path:
+                # No valid kernel available — clean up the container
+                container.remove(force=True)
+                raise ValueError(
+                    "System-mode emulation requires a valid kernel, but none was found. "
+                    "The firmware-extracted kernel (if any) failed validation and no "
+                    "pre-built kernels are available. Upload a QEMU-compatible kernel "
+                    "via the Kernel Manager."
+                )
+
             self._copy_file_to_container(
                 container, kernel_backend_path, CONTAINER_KERNEL_PATH,
             )
@@ -494,10 +563,21 @@ done
                 )
             return kernel_path
 
-        # 2) Kernel extracted from the firmware itself
+        # 2) Kernel extracted from the firmware itself — validate before using
         if firmware_kernel_path and os.path.isfile(firmware_kernel_path):
-            logger.info("Using kernel extracted from firmware: %s", firmware_kernel_path)
-            return firmware_kernel_path
+            is_valid, reason = _validate_kernel_file(firmware_kernel_path)
+            if is_valid:
+                logger.info(
+                    "Using kernel extracted from firmware: %s (%s)",
+                    firmware_kernel_path, reason,
+                )
+                return firmware_kernel_path
+            else:
+                logger.warning(
+                    "Firmware kernel candidate rejected: %s — %s. "
+                    "Falling through to pre-built kernels.",
+                    firmware_kernel_path, reason,
+                )
 
         # 3) Pre-built kernel from the kernel management directory
         svc = KernelService()

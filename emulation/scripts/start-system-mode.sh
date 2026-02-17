@@ -44,6 +44,34 @@ fi
 
 echo "Kernel file size: $(wc -c < "$KERNEL") bytes"
 
+# Suppress ALSA audio warnings from QEMU
+export QEMU_AUDIO_DRV=none
+
+# Validate kernel file format before proceeding with slow ext4 image creation
+KERNEL_MAGIC=$(xxd -p -l 4 "$KERNEL" 2>/dev/null)
+KERNEL_VALID=0
+case "$KERNEL_MAGIC" in
+    7f454c46) echo "Kernel format: ELF"; KERNEL_VALID=1 ;;           # ELF
+    27051956) echo "Kernel format: U-Boot uImage"; KERNEL_VALID=1 ;; # uImage
+    1f8b*)    echo "Kernel format: gzip-compressed"; KERNEL_VALID=1 ;; # gzip
+    5d0000*)  echo "Kernel format: LZMA-compressed"; KERNEL_VALID=1 ;; # LZMA
+esac
+# Check ARM zImage magic at offset 0x24
+if [ "$KERNEL_VALID" -eq 0 ]; then
+    ARM_MAGIC=$(xxd -p -l 4 -s 0x24 "$KERNEL" 2>/dev/null)
+    if [ "$ARM_MAGIC" = "18286f01" ]; then
+        echo "Kernel format: ARM zImage"
+        KERNEL_VALID=1
+    fi
+fi
+if [ "$KERNEL_VALID" -eq 0 ]; then
+    echo "ERROR: Unrecognized kernel format (magic: $KERNEL_MAGIC)"
+    echo "The file does not appear to be a valid kernel image (ELF/uImage/zImage/gzip/LZMA)."
+    echo "This may be a filesystem image or raw data extracted by binwalk."
+    echo "Upload a proper QEMU-compatible kernel via the Kernel Manager."
+    exit 1
+fi
+
 # Clean up stale files from previous runs
 rm -f "$SERIAL_SOCK" "$ROOTFS_IMG"
 

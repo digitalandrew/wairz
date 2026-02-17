@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models.project import Project
 from app.schemas.firmware import FirmwareDetailResponse, FirmwareUploadResponse
 from app.services.firmware_service import FirmwareService
-from app.workers.unpack import unpack_firmware
+from app.workers.unpack import detect_kernel, unpack_firmware
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/firmware", tags=["firmware"])
 
@@ -82,4 +82,31 @@ async def unpack(
         project.status = "error"
 
     await db.flush()
+    return firmware
+
+
+@router.post("/redetect-kernel", response_model=FirmwareDetailResponse)
+async def redetect_kernel(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    service: FirmwareService = Depends(get_firmware_service),
+):
+    """Re-run kernel detection on already-extracted firmware.
+
+    Useful after updating the detection heuristics to fix bad kernel_path values
+    without requiring a firmware re-upload.
+    """
+    firmware = await service.get_by_project(project_id)
+    if not firmware:
+        raise HTTPException(404, "No firmware uploaded for this project")
+
+    if not firmware.extracted_path:
+        raise HTTPException(400, "Firmware has not been unpacked yet")
+
+    # The extraction directory is the parent of extracted_path (filesystem root)
+    extraction_dir = os.path.dirname(firmware.extracted_path)
+
+    firmware.kernel_path = detect_kernel(extraction_dir, firmware.extracted_path)
+    await db.flush()
+
     return firmware
