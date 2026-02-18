@@ -16,6 +16,83 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Degeneration detection
+# ---------------------------------------------------------------------------
+
+class DegenerationError(Exception):
+    """Raised when the AI model produces degenerate (repetitive/nonsensical) output."""
+
+
+class DegenerationDetector:
+    """Monitors streamed text for signs of model degeneration.
+
+    Detection signals:
+    1. Long runs of text without whitespace (>80 chars).
+    2. Repeated 30-char n-grams appearing 5+ times in a rolling buffer.
+
+    Each signal increments a strike counter. At 3 strikes the stream is
+    considered degenerate.
+    """
+
+    MAX_SPACELESS_RUN = 80
+    NGRAM_LENGTH = 30
+    NGRAM_REPEAT_THRESHOLD = 5
+    BUFFER_SIZE = 2000
+    STRIKE_LIMIT = 3
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._spaceless_run = 0
+        self._strikes = 0
+
+    def feed(self, chunk: str) -> bool:
+        """Feed a text chunk. Returns True if degeneration is confirmed."""
+        for ch in chunk:
+            if ch in (" ", "\t", "\n", "\r"):
+                self._spaceless_run = 0
+            else:
+                self._spaceless_run += 1
+                if self._spaceless_run == self.MAX_SPACELESS_RUN:
+                    self._strikes += 1
+                    logger.warning(
+                        "Degeneration strike %d/%d: spaceless run of %d chars",
+                        self._strikes, self.STRIKE_LIMIT, self._spaceless_run,
+                    )
+                    if self._strikes >= self.STRIKE_LIMIT:
+                        return True
+
+        # Update rolling buffer
+        self._buffer += chunk
+        if len(self._buffer) > self.BUFFER_SIZE:
+            self._buffer = self._buffer[-self.BUFFER_SIZE:]
+
+        # Check for repeated n-grams once we have enough text
+        if len(self._buffer) >= self.NGRAM_LENGTH * self.NGRAM_REPEAT_THRESHOLD:
+            if self._check_ngram_repetition():
+                self._strikes += 1
+                logger.warning(
+                    "Degeneration strike %d/%d: repeated n-gram detected",
+                    self._strikes, self.STRIKE_LIMIT,
+                )
+                if self._strikes >= self.STRIKE_LIMIT:
+                    return True
+
+        return False
+
+    def _check_ngram_repetition(self) -> bool:
+        """Check if any n-gram appears too many times in the buffer."""
+        counts: dict[str, int] = {}
+        text = self._buffer
+        for i in range(len(text) - self.NGRAM_LENGTH + 1):
+            ngram = text[i:i + self.NGRAM_LENGTH]
+            counts[ngram] = counts.get(ngram, 0) + 1
+            if counts[ngram] >= self.NGRAM_REPEAT_THRESHOLD:
+                return True
+        return False
+
+
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
 ALLOWED_MODELS = {
     "claude-haiku-4-5-20251001",
@@ -188,6 +265,8 @@ class AIOrchestrator:
         The Anthropic SDK's built-in retry handles most transient errors,
         but for 429 specifically we add extra backoff with user notification.
         """
+        detector = DegenerationDetector()
+
         for attempt in range(max_retries + 1):
             try:
                 async with self._client.messages.stream(
@@ -198,6 +277,11 @@ class AIOrchestrator:
                     tools=tools,
                 ) as stream:
                     async for text in stream.text_stream:
+                        if detector.feed(text):
+                            raise DegenerationError(
+                                "Model output degenerated into "
+                                "repetitive/nonsensical text"
+                            )
                         await on_event({
                             "type": "assistant_text",
                             "content": text,
@@ -361,6 +445,23 @@ class AIOrchestrator:
                 "type": "assistant_text",
                 "content": "\n\n[Reached maximum tool call limit]",
                 "delta": False,
+            })
+            await on_event({"type": "done"})
+            return messages
+
+        except DegenerationError:
+            logger.warning("Degenerate output detected — aborting response")
+            # Don't append the degenerate response to history so it
+            # doesn't poison future turns.  The partially streamed text
+            # has already been sent to the client, so we just notify and
+            # stop.
+            await on_event({
+                "type": "error",
+                "content": (
+                    "The AI model produced incoherent output. This sometimes "
+                    "happens with complex queries. Please try rephrasing your "
+                    "request or starting a new conversation."
+                ),
             })
             await on_event({"type": "done"})
             return messages

@@ -8,7 +8,12 @@ from uuid import uuid4
 import anthropic.types as types
 import pytest
 
-from app.ai.orchestrator import AIOrchestrator, ProjectContext
+from app.ai.orchestrator import (
+    AIOrchestrator,
+    DegenerationDetector,
+    DegenerationError,
+    ProjectContext,
+)
 from app.ai.system_prompt import build_system_prompt
 from app.ai.tool_registry import ToolRegistry
 
@@ -434,6 +439,264 @@ class TestOrchestrator:
         # Loop should have continued to get final text
         assert events[-1] == {"type": "done"}
         assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# DegenerationDetector tests
+# ---------------------------------------------------------------------------
+
+class TestDegenerationDetector:
+    def test_normal_text_passes(self):
+        """Normal English text should not trigger detection."""
+        detector = DegenerationDetector()
+        text = (
+            "I'll start by examining the firmware filesystem structure. "
+            "Let me list the top-level directories to understand the layout. "
+            "The firmware appears to be based on OpenWrt with BusyBox utilities. "
+            "I can see typical embedded Linux directories like /bin, /etc, /lib, "
+            "/sbin, /tmp, /usr, and /var. Let me check for interesting binaries."
+        )
+        # Feed in small chunks to simulate streaming
+        for i in range(0, len(text), 10):
+            assert detector.feed(text[i:i+10]) is False
+
+    def test_normal_text_with_code_blocks(self):
+        """Code blocks and technical content should not trigger."""
+        detector = DegenerationDetector()
+        text = (
+            "Here's the disassembly:\n"
+            "```\n"
+            "0x00400000  push {r4, r5, r6, lr}\n"
+            "0x00400004  mov r4, r0\n"
+            "0x00400008  ldr r0, [r4, #0x10]\n"
+            "0x0040000c  bl 0x00401234\n"
+            "```\n"
+            "The function starts by saving registers and loading a pointer.\n"
+        )
+        for i in range(0, len(text), 15):
+            assert detector.feed(text[i:i+15]) is False
+
+    def test_urls_do_not_trigger(self):
+        """A single long URL should not be enough to trigger (only 1 strike)."""
+        detector = DegenerationDetector()
+        # A long URL is one spaceless run, so 1 strike — not enough
+        url = "https://www.example.com/very/long/path/to/some/resource/with/many/segments/and/parameters?key=value&foo=bar"
+        assert detector.feed(url) is False
+        assert detector._strikes == 1  # One strike for long spaceless run
+
+    def test_spaceless_run_triggers_strike(self):
+        """A run of 80+ chars without whitespace should increment strikes."""
+        detector = DegenerationDetector()
+        chunk = "a" * 80
+        detector.feed(chunk)
+        assert detector._strikes == 1
+
+    def test_spaceless_run_below_threshold_no_strike(self):
+        """A run of <80 chars without whitespace should not strike."""
+        detector = DegenerationDetector()
+        chunk = "a" * 79
+        detector.feed(chunk)
+        assert detector._strikes == 0
+
+    def test_spaceless_run_resets_on_whitespace(self):
+        """Whitespace should reset the spaceless run counter."""
+        detector = DegenerationDetector()
+        # 70 chars, space, 70 chars — neither run exceeds 80
+        chunk = "a" * 70 + " " + "b" * 70
+        detector.feed(chunk)
+        assert detector._strikes == 0
+
+    def test_multiple_spaceless_runs_accumulate_strikes(self):
+        """Multiple long spaceless runs should accumulate strikes."""
+        detector = DegenerationDetector()
+        for _ in range(3):
+            detector.feed("x" * 80 + " ")
+        assert detector._strikes >= 3
+
+    def test_three_spaceless_runs_trigger_degeneration(self):
+        """Three spaceless runs should trigger degeneration (3 strikes)."""
+        detector = DegenerationDetector()
+        # Use unique chars per position to avoid also triggering n-gram detection
+        run1 = "".join(chr(ord("a") + (i % 26)) for i in range(80))
+        run2 = "".join(chr(ord("A") + (i % 26)) for i in range(80))
+        run3 = "".join(chr(ord("0") + (i % 10)) for i in range(80))
+        # First two runs: strikes but no trigger
+        assert detector.feed(run1 + " ") is False
+        assert detector.feed(run2 + " ") is False
+        # Third run: triggers
+        assert detector.feed(run3) is True
+
+    def test_repeated_ngrams_trigger_strike(self):
+        """Repeated 30-char substrings should trigger strikes."""
+        detector = DegenerationDetector()
+        # Create text with a 30-char pattern repeated 5 times
+        pattern = "debuggingoverallstructurenulls"  # 29 chars
+        pattern = pattern + "x"  # 30 chars
+        repeated = pattern * 5  # 150 chars, each 30-char ngram appears 5 times
+        # Feed with spaces between to avoid spaceless-run strikes
+        detector.feed(repeated)
+        assert detector._strikes >= 1
+
+    def test_ngram_repetition_with_surrounding_text(self):
+        """N-gram detection works when repeated pattern is embedded in other text."""
+        detector = DegenerationDetector()
+        pattern = "this is a repeating substring!"  # 30 chars
+        text = "Some intro text. " + (pattern + " ") * 6 + "Some outro text."
+        detector.feed(text)
+        assert detector._strikes >= 1
+
+    def test_combined_signals_trigger_degeneration(self):
+        """Mix of spaceless runs and n-gram repetition should accumulate to 3 strikes."""
+        detector = DegenerationDetector()
+        # 2 spaceless run strikes (unique chars to avoid n-gram overlap)
+        run1 = "".join(chr(ord("a") + (i % 26)) for i in range(80))
+        run2 = "".join(chr(ord("A") + (i % 26)) for i in range(80))
+        detector.feed(run1 + " ")
+        detector.feed(run2 + " ")
+        assert detector._strikes == 2
+        # Now a repeated n-gram adds the 3rd strike
+        pattern = "repeated_pattern_that_is_exact"  # 30 chars
+        text = (pattern + " ") * 6
+        triggered = detector.feed(text)
+        assert triggered is True
+
+    def test_chunk_boundary_spaceless_run(self):
+        """Spaceless run detection works across chunk boundaries."""
+        detector = DegenerationDetector()
+        # 80 chars split across two chunks
+        assert detector.feed("a" * 40) is False
+        assert detector._strikes == 0
+        # Continue the run in next chunk
+        detector.feed("a" * 40)
+        assert detector._strikes == 1
+
+    def test_buffer_rolling_window(self):
+        """Buffer should not grow beyond BUFFER_SIZE."""
+        detector = DegenerationDetector()
+        # Feed more than BUFFER_SIZE chars
+        for _ in range(30):
+            detector.feed("normal text with spaces " * 10)
+        assert len(detector._buffer) <= DegenerationDetector.BUFFER_SIZE
+
+    def test_empty_chunks_ignored(self):
+        """Empty string chunks should not cause issues."""
+        detector = DegenerationDetector()
+        assert detector.feed("") is False
+        assert detector._strikes == 0
+
+    def test_realistic_degenerate_output(self):
+        """Simulate actual degenerate output from a model."""
+        detector = DegenerationDetector()
+        # This simulates the kind of output described in the bug report
+        degenerate = "looksstooverthesimplestringswhichisidealfor" * 20
+        triggered = False
+        for i in range(0, len(degenerate), 50):
+            if detector.feed(degenerate[i:i+50]):
+                triggered = True
+                break
+        assert triggered is True
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator degeneration integration test
+# ---------------------------------------------------------------------------
+
+class TestOrchestratorDegeneration:
+    @pytest.fixture
+    def registry(self):
+        return ToolRegistry()
+
+    @pytest.fixture
+    def orchestrator(self, registry):
+        with patch("app.ai.orchestrator.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(
+                anthropic_api_key="sk-test-key",
+                max_tool_iterations=25,
+            )
+            orch = AIOrchestrator(registry, api_key="sk-test-key")
+        return orch
+
+    @pytest.fixture
+    def context(self):
+        return _make_project_context()
+
+    @pytest.fixture
+    def db(self):
+        return MagicMock()
+
+    @pytest.mark.asyncio
+    async def test_degenerate_stream_aborts(self, orchestrator, context, db):
+        """Degenerate output should abort the stream and emit an error."""
+        events = []
+
+        async def on_event(event):
+            events.append(event)
+
+        # Build a stream that produces degenerate output (long spaceless runs)
+        degenerate_chunks = [
+            "a" * 80 + " ",  # strike 1
+            "b" * 80 + " ",  # strike 2
+            "c" * 80,        # strike 3 → triggers
+        ]
+
+        final_msg = _make_message(
+            [_text_block("This should not be reached.")],
+            stop_reason="end_turn",
+        )
+        mock_stream = MockStream(degenerate_chunks, final_msg)
+        orchestrator._client.messages.stream = MagicMock(return_value=mock_stream)
+
+        messages = [{"role": "user", "content": "Hello"}]
+        result = await orchestrator.run_conversation(messages, context, db, on_event)
+
+        # Should have error event about incoherent output
+        error_events = [e for e in events if e["type"] == "error"]
+        assert len(error_events) == 1
+        assert "incoherent" in error_events[0]["content"].lower()
+
+        # Should end with done
+        assert events[-1] == {"type": "done"}
+
+        # The degenerate message should NOT be appended to history
+        assert len(result) == 1  # Only the original user message
+        assert result[0]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_normal_stream_not_affected(self, orchestrator, context, db):
+        """Normal text should not trigger degeneration detection."""
+        events = []
+
+        async def on_event(event):
+            events.append(event)
+
+        normal_chunks = [
+            "I'll analyze the firmware ",
+            "by first examining the filesystem. ",
+            "Let me look at /etc/passwd for default credentials.",
+        ]
+
+        final_msg = _make_message(
+            [_text_block("".join(normal_chunks))],
+            stop_reason="end_turn",
+        )
+        mock_stream = MockStream(normal_chunks, final_msg)
+        orchestrator._client.messages.stream = MagicMock(return_value=mock_stream)
+
+        messages = [{"role": "user", "content": "Analyze this firmware"}]
+        result = await orchestrator.run_conversation(messages, context, db, on_event)
+
+        # No error events
+        error_events = [e for e in events if e["type"] == "error"]
+        assert len(error_events) == 0
+
+        # Should have text events and done
+        text_events = [e for e in events if e["type"] == "assistant_text"]
+        assert len(text_events) == 3
+        assert events[-1] == {"type": "done"}
+
+        # Message should be appended normally
+        assert len(result) == 2
+        assert result[1]["role"] == "assistant"
 
     @pytest.mark.asyncio
     async def test_messages_serialized_correctly(self, orchestrator, context, db):
