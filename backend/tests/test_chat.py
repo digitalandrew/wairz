@@ -395,7 +395,7 @@ class TestWebSocketChat:
 
         mock_db = _setup_db_lookups(project, conversation, firmware)
 
-        async def mock_run_conversation(messages, context, db, on_event):
+        async def mock_run_conversation(messages, context, db, on_event, **kwargs):
             await on_event({"type": "assistant_text", "content": "Hello!", "delta": True})
             await on_event({"type": "done"})
             messages.append({
@@ -483,7 +483,7 @@ class TestWebSocketChat:
 
         mock_db = _setup_db_lookups(project, conversation, firmware)
 
-        async def mock_run_conversation(messages, context, db, on_event):
+        async def mock_run_conversation(messages, context, db, on_event, **kwargs):
             await on_event({"type": "assistant_text", "content": "Got it", "delta": True})
             await on_event({"type": "done"})
             messages.append({

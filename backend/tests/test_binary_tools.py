@@ -238,12 +238,14 @@ class TestRegistration:
         assert names == {
             "list_functions",
             "disassemble_function",
+            "decompile_function",
             "list_imports",
             "list_exports",
             "xrefs_to",
             "xrefs_from",
             "get_binary_info",
             "check_binary_protections",
+            "cleanup_decompiled_code",
         }
 
     def test_tool_schemas_valid(self, registry):

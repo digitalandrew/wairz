@@ -113,7 +113,7 @@ class TestSystemPrompt:
 
     def test_includes_methodology(self):
         prompt = build_system_prompt("P", "f.bin", "arm", "little", "/ex")
-        assert "Hardcoded credentials" in prompt
+        assert "hardcoded credentials" in prompt.lower()
         assert "security" in prompt.lower()
 
     def test_includes_extracted_path(self):

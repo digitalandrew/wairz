@@ -179,7 +179,7 @@ class TestToolRegistry:
 
     def test_anthropic_format_shape(self, registry):
         tools = registry.get_anthropic_tools()
-        assert len(tools) == 5
+        assert len(tools) == 6
         for tool in tools:
             assert "name" in tool
             assert "description" in tool
