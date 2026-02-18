@@ -53,6 +53,8 @@ async def read_file(
         content = service.read_file(path, offset, length, format=format)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except PermissionError as e:
+        raise HTTPException(403, str(e))
     return dataclasses.asdict(content)
 
 
@@ -65,6 +67,8 @@ async def file_info(
         info = service.file_info(path)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except PermissionError as e:
+        raise HTTPException(403, str(e))
     return dataclasses.asdict(info)
 
 

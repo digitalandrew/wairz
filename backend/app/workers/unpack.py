@@ -53,8 +53,13 @@ def find_filesystem_root(extraction_dir: str) -> str | None:
     """Find the extracted filesystem root by looking for Linux directory markers."""
     # Walk all subdirectories looking for one that has /etc and (/usr or /bin)
     for root, dirs, _files in os.walk(extraction_dir):
-        has_etc = "etc" in dirs
-        has_usr_or_bin = "usr" in dirs or "bin" in dirs
+        # os.walk() only lists real directories in `dirs`, not symlinks.
+        # Firmware often has standard dirs as symlinks (e.g. /etc -> /dev/null,
+        # /bin -> /usr/bin for merged-usr), so use listdir to see everything.
+        all_entries = set(os.listdir(root))
+
+        has_etc = "etc" in all_entries or "etc_ro" in all_entries
+        has_usr_or_bin = "usr" in all_entries or "bin" in all_entries
         if has_etc and has_usr_or_bin:
             return root
 

@@ -8,7 +8,7 @@ from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.models.analysis_cache import AnalysisCache
 from app.services.component_map_service import ComponentMapService
 from app.services.file_service import FileService
-from app.utils.sandbox import validate_path
+from app.utils.sandbox import safe_walk, validate_path
 
 MAX_FIND_RESULTS = 100
 
@@ -83,7 +83,7 @@ def _find_files_by_type(extracted_root: str, file_type: str, path: str | None) -
     real_root = os.path.realpath(extracted_root)
     matches: list[str] = []
 
-    for dirpath, _dirs, files in os.walk(search_root):
+    for dirpath, _dirs, files in safe_walk(search_root):
         for name in files:
             abs_path = os.path.join(dirpath, name)
             if _matches_type(abs_path, name, file_type):
@@ -118,6 +118,8 @@ async def _handle_list_directory(input: dict, context: ToolContext) -> str:
             suffix = "/"
         elif e.type == "symlink" and e.symlink_target:
             suffix = f" -> {e.symlink_target}"
+            if e.broken:
+                suffix += " [broken]"
         lines.append(f"{e.permissions}  {e.size:>8}  {e.name}{suffix}")
 
     result = "\n".join(lines)

@@ -10,7 +10,7 @@ import re
 import stat
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
-from app.utils.sandbox import validate_path
+from app.utils.sandbox import safe_walk, validate_path
 
 MAX_RESULTS = 100
 
@@ -238,7 +238,7 @@ async def _handle_check_setuid_binaries(input: dict, context: ToolContext) -> st
     setuid_files: list[str] = []
     setgid_files: list[str] = []
 
-    for dirpath, _dirs, files in os.walk(search_root):
+    for dirpath, _dirs, files in safe_walk(search_root):
         for name in files:
             abs_path = os.path.join(dirpath, name)
             try:
@@ -444,7 +444,7 @@ async def _handle_check_filesystem_permissions(input: dict, context: ToolContext
     sensitive_weak: list[str] = []
     world_exec: list[str] = []
 
-    for dirpath, dirs, files in os.walk(search_root):
+    for dirpath, dirs, files in safe_walk(search_root):
         for name in files + dirs:
             abs_path = os.path.join(dirpath, name)
             try:

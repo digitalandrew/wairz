@@ -7,7 +7,7 @@ import re
 from collections import Counter
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
-from app.utils.sandbox import validate_path
+from app.utils.sandbox import safe_walk, validate_path
 
 MAX_STRINGS = 200
 MAX_GREP_RESULTS = 100
@@ -247,7 +247,7 @@ async def _handle_find_crypto_material(input: dict, context: ToolContext) -> str
         "crypto_files": [],
     }
 
-    for dirpath, _dirs, files in os.walk(search_path):
+    for dirpath, _dirs, files in safe_walk(search_path):
         for name in files:
             abs_path = os.path.join(dirpath, name)
             rel_path = "/" + os.path.relpath(abs_path, real_root)
@@ -332,7 +332,7 @@ async def _handle_find_hardcoded_credentials(
             pass
 
     # Walk filesystem for credential patterns
-    for dirpath, _dirs, files in os.walk(search_path):
+    for dirpath, _dirs, files in safe_walk(search_path):
         if len(results) >= MAX_CRED_RESULTS:
             break
         for name in files:

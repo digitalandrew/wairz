@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import magic
 from elftools.elf.elffile import ELFFile
 
-from app.utils.sandbox import validate_path
+from app.utils.sandbox import safe_walk, validate_path
 
 MAX_ENTRIES = 200
 MAX_READ_SIZE = 50 * 1024  # 50KB
@@ -22,6 +22,7 @@ class FileEntry:
     size: int
     permissions: str
     symlink_target: str | None = None
+    broken: bool = False
 
 
 @dataclass
@@ -108,11 +109,15 @@ class FileService:
                 st = os.lstat(entry_path)
                 file_type = _file_type_from_stat(st)
                 symlink_target = None
+                is_broken = False
                 if stat.S_ISLNK(st.st_mode):
                     try:
                         symlink_target = os.readlink(entry_path)
                     except OSError:
                         pass
+                    # Broken symlink: target does not exist
+                    if not os.path.exists(entry_path):
+                        is_broken = True
                 entries.append(
                     FileEntry(
                         name=name,
@@ -120,6 +125,7 @@ class FileService:
                         size=st.st_size,
                         permissions=_format_permissions(st.st_mode),
                         symlink_target=symlink_target,
+                        broken=is_broken,
                     )
                 )
             except OSError:
@@ -144,12 +150,19 @@ class FileService:
         if not os.path.isfile(full_path):
             raise FileNotFoundError(f"Not a file: {path}")
 
-        file_size = os.path.getsize(full_path)
+        try:
+            file_size = os.path.getsize(full_path)
+        except PermissionError:
+            raise PermissionError(f"Permission denied: {path}")
+
         read_length = min(length or MAX_READ_SIZE, MAX_READ_SIZE)
 
-        with open(full_path, "rb") as f:
-            f.seek(offset)
-            data = f.read(read_length)
+        try:
+            with open(full_path, "rb") as f:
+                f.seek(offset)
+                data = f.read(read_length)
+        except PermissionError:
+            raise PermissionError(f"Permission denied: {path}")
 
         truncated = (offset + len(data)) < file_size
 
@@ -192,17 +205,22 @@ class FileService:
         # MIME type detection
         try:
             mime_type = magic.from_file(full_path, mime=True)
+        except PermissionError:
+            raise PermissionError(f"Permission denied: {path}")
         except Exception:
             mime_type = "application/octet-stream"
 
         # SHA256 for regular files
         sha256 = None
         if stat.S_ISREG(st.st_mode):
-            h = hashlib.sha256()
-            with open(full_path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    h.update(chunk)
-            sha256 = h.hexdigest()
+            try:
+                h = hashlib.sha256()
+                with open(full_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        h.update(chunk)
+                sha256 = h.hexdigest()
+            except PermissionError:
+                raise PermissionError(f"Permission denied: {path}")
 
         # ELF info if applicable
         elf_info = None
@@ -240,7 +258,7 @@ class FileService:
         matches = []
         truncated = False
 
-        for root, dirs, files in os.walk(full_path):
+        for root, dirs, files in safe_walk(full_path):
             for name in files + dirs:
                 if fnmatch.fnmatch(name, pattern):
                     abs_path = os.path.join(root, name)
