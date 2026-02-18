@@ -28,7 +28,7 @@ const projectSubPages = [
   { suffix: '/findings', label: 'Findings', icon: ShieldAlert },
   { suffix: '/map', label: 'Component Map', icon: Network },
   { suffix: '/sbom', label: 'SBOM', icon: Package },
-  { suffix: '/emulation', label: 'Emulation', icon: PlayCircle },
+  { suffix: '/emulation', label: 'Emulation (experimental)', icon: PlayCircle },
 ]
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
