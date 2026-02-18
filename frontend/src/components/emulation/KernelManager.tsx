@@ -130,9 +130,9 @@ export default function KernelManager({
     const prompt =
       `I need help finding a pre-built Linux kernel for system-mode emulation of this firmware. ` +
       `The firmware architecture is ${arch}. ` +
-      `Please use the list_available_kernels tool to check what's currently available, ` +
-      `then advise me on where to download or how to build a compatible kernel. ` +
-      `Include specific download links or build instructions if possible.`
+      `Please use the list_available_kernels tool to check what's currently available. ` +
+      `If no matching kernel is found, find a suitable kernel from a trusted source ` +
+      `and use the download_kernel tool to install it. Please explain your choice before downloading.`
     setPendingMessage(prompt)
     onRequestChat?.()
   }, [firmwareArchitecture, setPendingMessage, onRequestChat])

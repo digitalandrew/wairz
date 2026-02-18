@@ -113,9 +113,21 @@ async def list_sessions(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all emulation sessions for this project."""
+    """List all emulation sessions for this project.
+
+    Also updates status for any sessions that claim to be running —
+    detects dead QEMU processes and captures error logs.
+    """
     svc = EmulationService(db)
-    return await svc.list_sessions(project_id)
+    sessions = await svc.list_sessions(project_id)
+    # Update status for running sessions (detect dead QEMU)
+    for session in sessions:
+        if session.status in ("running", "starting"):
+            try:
+                await svc.get_status(session.id)
+            except Exception:
+                pass
+    return sessions
 
 
 @router.get("/{session_id}/status", response_model=EmulationSessionResponse)
@@ -131,6 +143,21 @@ async def get_session_status(
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     return session
+
+
+@router.get("/{session_id}/logs")
+async def get_session_logs(
+    project_id: uuid.UUID,
+    session_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get QEMU startup/error logs for an emulation session."""
+    svc = EmulationService(db)
+    try:
+        logs = await svc.get_session_logs(session_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return {"logs": logs}
 
 
 @router.websocket("/{session_id}/terminal")

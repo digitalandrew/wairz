@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     nvd_api_key: str = ""
     emulation_timeout_minutes: int = 30
     emulation_max_sessions: int = 3
-    emulation_memory_limit_mb: int = 512
+    emulation_memory_limit_mb: int = 1024
     emulation_cpu_limit: float = 1.0
     emulation_image: str = "wairz-emulation"
     emulation_kernel_dir: str = "/opt/kernels"

@@ -9,6 +9,7 @@ class KernelResponse(BaseModel):
     description: str
     file_size: int
     uploaded_at: str
+    has_initrd: bool = False
 
 
 class KernelListResponse(BaseModel):

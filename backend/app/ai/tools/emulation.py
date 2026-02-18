@@ -42,6 +42,50 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
     )
 
     registry.register(
+        name="download_kernel",
+        description=(
+            "Download a pre-built Linux kernel from a URL and install it for "
+            "system-mode emulation. Use this when no suitable kernel is available "
+            "for the firmware's architecture. Before downloading, explain to the "
+            "user which kernel you plan to download and why.\n\n"
+            "Common trusted sources:\n"
+            "- OpenWrt downloads (downloads.openwrt.org) — pre-built kernels for ARM, MIPS\n"
+            "- kernel.org — official Linux kernel releases\n"
+            "- GitHub releases — project-specific kernel builds\n\n"
+            "The URL must be HTTPS (HTTP allowed but not recommended). "
+            "Private/loopback IPs are blocked for security. "
+            "The downloaded file is validated as a real kernel image before installation."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Direct download URL for the kernel binary (must be https)",
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Name for the kernel (alphanumeric, hyphens, underscores, dots). "
+                        "Example: 'vmlinux-arm-openwrt-5.15'"
+                    ),
+                },
+                "architecture": {
+                    "type": "string",
+                    "enum": ["arm", "aarch64", "mips", "mipsel", "x86", "x86_64"],
+                    "description": "Target architecture for this kernel",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional description (e.g., 'OpenWrt 23.05 ARM kernel')",
+                },
+            },
+            "required": ["url", "name", "architecture"],
+        },
+        handler=_handle_download_kernel,
+    )
+
+    registry.register(
         name="start_emulation",
         description=(
             "Start a QEMU-based emulation session for dynamic firmware analysis. "
@@ -200,6 +244,47 @@ async def _handle_list_kernels(input: dict, context: ToolContext) -> str:
         lines.append(f"  {k['name']} [{k['architecture']}] ({size_mb:.1f} MB){desc}")
 
     return "\n".join(lines)
+
+
+async def _handle_download_kernel(input: dict, context: ToolContext) -> str:
+    """Download and install a kernel from a URL."""
+    url = input.get("url", "")
+    name = input.get("name", "")
+    architecture = input.get("architecture", "")
+    description = input.get("description", "")
+
+    if not url or not name or not architecture:
+        return "Error: url, name, and architecture are required."
+
+    svc = KernelService()
+    try:
+        result = svc.list_kernels()
+        existing = [k["name"] for k in result]
+        if name in existing:
+            return f"Error: a kernel named '{name}' already exists. Choose a different name."
+
+        kernel_info = await svc.download_kernel(
+            url=url,
+            name=name,
+            architecture=architecture,
+            description=description,
+        )
+        size_mb = kernel_info["file_size"] / (1024 * 1024)
+        return (
+            f"Kernel downloaded and installed successfully.\n"
+            f"  Name: {kernel_info['name']}\n"
+            f"  Architecture: {kernel_info['architecture']}\n"
+            f"  Size: {size_mb:.1f} MB\n"
+            f"  Source: {url}\n\n"
+            "The kernel is now available for system-mode emulation. "
+            "You can use start_emulation with kernel_name='"
+            f"{kernel_info['name']}' or it will be auto-selected for "
+            f"{architecture} firmware."
+        )
+    except ValueError as exc:
+        return f"Error downloading kernel: {exc}"
+    except Exception as exc:
+        return f"Error downloading kernel: {exc}"
 
 
 async def _handle_start_emulation(input: dict, context: ToolContext) -> str:

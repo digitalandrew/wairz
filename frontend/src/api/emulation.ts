@@ -58,6 +58,16 @@ export async function getSessionStatus(
   return data
 }
 
+export async function getSessionLogs(
+  projectId: string,
+  sessionId: string,
+): Promise<string> {
+  const { data } = await apiClient.get<{ logs: string }>(
+    `/projects/${projectId}/emulation/${sessionId}/logs`,
+  )
+  return data.logs
+}
+
 export function buildEmulationTerminalURL(
   projectId: string,
   sessionId: string,

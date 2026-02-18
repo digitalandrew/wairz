@@ -11,6 +11,9 @@ import {
   Cpu,
   Clock,
   AlertCircle,
+  FileText,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -22,6 +25,7 @@ import {
   stopEmulation,
   listSessions,
   getSessionStatus,
+  getSessionLogs,
   buildEmulationTerminalURL,
 } from '@/api/emulation'
 import { getFirmware } from '@/api/firmware'
@@ -104,13 +108,13 @@ export default function EmulationPage() {
       .catch(() => {})
   }, [projectId])
 
-  // Poll for status updates
+  // Poll for status updates (faster during active sessions)
   useEffect(() => {
     if (!projectId) return
     const hasActive = sessions.some((s) => s.status === 'running' || s.status === 'starting')
     if (!hasActive) return
 
-    const interval = setInterval(loadSessions, 5000)
+    const interval = setInterval(loadSessions, 2000)
     return () => clearInterval(interval)
   }, [projectId, sessions, loadSessions])
 
@@ -133,8 +137,8 @@ export default function EmulationPage() {
         kernel_name: mode === 'system' && kernelName ? kernelName : undefined,
       })
       setActiveSession(session)
-      if (session.status === 'running') {
-        setShowTerminal(true)
+      if (session.status === 'running' || session.status === 'error') {
+        setShowTerminal(session.status === 'running')
       }
       await loadSessions()
     } catch (err: unknown) {
@@ -384,79 +388,16 @@ export default function EmulationPage() {
               <p className="text-xs text-muted-foreground/60">No emulation sessions yet</p>
             )}
 
-            {sessions.map((session) => {
-              const statusCfg = STATUS_CONFIG[session.status] || STATUS_CONFIG.stopped
-              const isActive = activeSession?.id === session.id
-
-              return (
-                <div
-                  key={session.id}
-                  className={`rounded-lg border p-3 transition-colors ${
-                    isActive
-                      ? 'border-primary/50 bg-primary/5'
-                      : 'border-border hover:border-border/80'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Badge className={`text-[10px] ${statusCfg.className}`}>
-                        {statusCfg.label}
-                      </Badge>
-                      <span className="text-xs font-medium">
-                        {session.mode === 'user' ? 'User' : 'System'} Mode
-                      </span>
-                    </div>
-                    {session.architecture && (
-                      <Badge variant="outline" className="text-[10px]">
-                        {session.architecture}
-                      </Badge>
-                    )}
-                  </div>
-
-                  {session.binary_path && (
-                    <p className="mt-1 truncate text-xs text-muted-foreground font-mono">
-                      {session.binary_path}
-                    </p>
-                  )}
-
-                  <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-                    <Clock className="h-3 w-3" />
-                    {formatDate(session.created_at)}
-                  </div>
-
-                  {session.error_message && (
-                    <p className="mt-1 text-[10px] text-destructive truncate">
-                      {session.error_message}
-                    </p>
-                  )}
-
-                  <div className="mt-2 flex gap-2">
-                    {session.status === 'running' && (
-                      <>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={() => handleConnect(session)}
-                        >
-                          <TerminalSquare className="mr-1 h-3 w-3" />
-                          Connect
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={() => handleStop(session.id)}
-                        >
-                          <Square className="mr-1 h-3 w-3" />
-                          Stop
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
+            {sessions.map((session) => (
+              <SessionCard
+                key={session.id}
+                session={session}
+                isActive={activeSession?.id === session.id}
+                projectId={projectId!}
+                onConnect={() => handleConnect(session)}
+                onStop={() => handleStop(session.id)}
+              />
+            ))}
           </div>
         </div>
 
@@ -491,6 +432,144 @@ export default function EmulationPage() {
           <ChatPanel isOpen={true} onToggle={() => setChatOpen(false)} />
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Session card with error display and log viewer ──
+
+interface SessionCardProps {
+  session: EmulationSession
+  isActive: boolean
+  projectId: string
+  onConnect: () => void
+  onStop: () => void
+}
+
+function SessionCard({ session, isActive, projectId, onConnect, onStop }: SessionCardProps) {
+  const statusCfg = STATUS_CONFIG[session.status] || STATUS_CONFIG.stopped
+  const [showLogs, setShowLogs] = useState(false)
+  const [logs, setLogs] = useState<string | null>(null)
+  const [logsLoading, setLogsLoading] = useState(false)
+
+  const handleViewLogs = async () => {
+    if (showLogs) {
+      setShowLogs(false)
+      return
+    }
+    setShowLogs(true)
+    setLogsLoading(true)
+    try {
+      const logText = await getSessionLogs(projectId, session.id)
+      setLogs(logText)
+    } catch {
+      setLogs('Failed to fetch logs')
+    } finally {
+      setLogsLoading(false)
+    }
+  }
+
+  return (
+    <div
+      className={`rounded-lg border p-3 transition-colors ${
+        isActive
+          ? 'border-primary/50 bg-primary/5'
+          : 'border-border hover:border-border/80'
+      }`}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Badge className={`text-[10px] ${statusCfg.className}`}>
+            {statusCfg.label}
+          </Badge>
+          <span className="text-xs font-medium">
+            {session.mode === 'user' ? 'User' : 'System'} Mode
+          </span>
+        </div>
+        {session.architecture && (
+          <Badge variant="outline" className="text-[10px]">
+            {session.architecture}
+          </Badge>
+        )}
+      </div>
+
+      {session.binary_path && (
+        <p className="mt-1 truncate text-xs text-muted-foreground font-mono">
+          {session.binary_path}
+        </p>
+      )}
+
+      <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
+        <Clock className="h-3 w-3" />
+        {formatDate(session.created_at)}
+      </div>
+
+      {/* Error message — prominent display */}
+      {session.error_message && (
+        <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div className="min-w-0">
+              <p className="font-medium">Emulation failed</p>
+              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[11px] opacity-90 font-mono">
+                {session.error_message}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-2 flex flex-wrap gap-2">
+        {session.status === 'running' && (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={onConnect}
+            >
+              <TerminalSquare className="mr-1 h-3 w-3" />
+              Connect
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={onStop}
+            >
+              <Square className="mr-1 h-3 w-3" />
+              Stop
+            </Button>
+          </>
+        )}
+        {/* View Logs button — available for any session with a container */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-xs"
+          onClick={handleViewLogs}
+        >
+          <FileText className="mr-1 h-3 w-3" />
+          Logs
+          {showLogs ? <ChevronUp className="ml-1 h-3 w-3" /> : <ChevronDown className="ml-1 h-3 w-3" />}
+        </Button>
+      </div>
+
+      {/* Expandable log viewer */}
+      {showLogs && (
+        <div className="mt-2 rounded-md border border-border bg-[#0a0a0b] p-2">
+          {logsLoading ? (
+            <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Loading logs...
+            </div>
+          ) : (
+            <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words text-[11px] text-zinc-300 font-mono">
+              {logs || 'No logs available'}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -574,6 +653,16 @@ function EmulationTerminal({ projectId, session, onClose }: EmulationTerminalPro
 
     ws.onclose = () => {
       term.write('\r\n\x1b[90m[Session disconnected]\x1b[0m\r\n')
+      // Fetch logs to show what happened
+      getSessionLogs(projectId, session.id)
+        .then((logText) => {
+          if (logText && logText !== '(no log available)') {
+            term.write('\r\n\x1b[33m--- QEMU Startup Log ---\x1b[0m\r\n')
+            term.write(logText.replace(/\n/g, '\r\n'))
+            term.write('\r\n\x1b[33m--- End Log ---\x1b[0m\r\n')
+          }
+        })
+        .catch(() => {})
     }
 
     const onData = term.onData((data: string) => {

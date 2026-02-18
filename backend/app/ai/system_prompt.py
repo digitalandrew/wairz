@@ -47,8 +47,10 @@ Emulation capabilities:
 - System mode: boot the full firmware OS (slower, good for testing services and network behavior)
   - System mode REQUIRES a pre-built Linux kernel matching the firmware architecture
   - Use list_available_kernels to check what's available before starting system mode
-  - If no kernel matches, explain to the user what they need and where to get it
-  - Common sources: OpenWrt downloads, Buildroot, Debian cross-compiled kernels
+  - If no kernel matches, use download_kernel to fetch one from a known source
+  - Before downloading, explain which kernel you plan to download and why
+  - Common sources: OpenWrt downloads (downloads.openwrt.org), kernel.org, GitHub releases
+  - If download fails, explain alternative options (manual upload, building from source)
 - Use emulation to VALIDATE static findings: test if default credentials work, check if services are accessible, verify network behavior
 - Caveats: emulated firmware may behave differently than on real hardware (missing peripherals, different timing, no flash storage). Note these limitations when reporting findings
 - Always stop emulation sessions when done to free resources

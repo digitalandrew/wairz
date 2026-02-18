@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     e2fsprogs \
     kpartx \
     xxd \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy helper scripts

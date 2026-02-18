@@ -1,0 +1,6 @@
+{
+  "architecture": "arm",
+  "description": "QEMU ARM kernel 4.19.50 for Raspberry Pi emulation",
+  "uploaded_at": "2026-02-17T19:07:04.560540+00:00",
+  "source_url": "https://github.com/dhruvvyas90/qemu-rpi-kernel/raw/master/kernel-qemu-4.19.50-buster"
+}

@@ -10,6 +10,7 @@ ARCH="$1"
 ROOTFS="$2"
 KERNEL="$3"
 PORT_FORWARDS="$4"  # comma-separated host:guest pairs, e.g., "8080:80,2222:22"
+INITRD="$5"         # optional path to initramfs/initrd image
 
 LOG="/tmp/qemu-system.log"
 SERIAL_SOCK="/tmp/qemu-serial.sock"
@@ -72,6 +73,32 @@ if [ "$KERNEL_VALID" -eq 0 ]; then
     exit 1
 fi
 
+# Decompress kernel if gzip/LZMA compressed — QEMU may not handle compressed
+# kernels directly (especially for aarch64 Image format)
+case "$KERNEL_MAGIC" in
+    1f8b*)
+        echo "Decompressing gzip-compressed kernel..."
+        KERNEL_DECOMPRESSED="/tmp/kernel_decompressed"
+        if gunzip -c "$KERNEL" > "$KERNEL_DECOMPRESSED" 2>&1; then
+            KERNEL="$KERNEL_DECOMPRESSED"
+            echo "Decompressed kernel: $(wc -c < "$KERNEL") bytes"
+        else
+            echo "WARNING: Failed to decompress kernel, trying as-is"
+        fi
+        ;;
+    5d0000*)
+        echo "Decompressing LZMA-compressed kernel..."
+        KERNEL_DECOMPRESSED="/tmp/kernel_decompressed"
+        if unlzma -c "$KERNEL" > "$KERNEL_DECOMPRESSED" 2>/dev/null || \
+           lzma -dc "$KERNEL" > "$KERNEL_DECOMPRESSED" 2>/dev/null; then
+            KERNEL="$KERNEL_DECOMPRESSED"
+            echo "Decompressed kernel: $(wc -c < "$KERNEL") bytes"
+        else
+            echo "WARNING: Failed to decompress kernel, trying as-is"
+        fi
+        ;;
+esac
+
 # Clean up stale files from previous runs
 rm -f "$SERIAL_SOCK" "$ROOTFS_IMG"
 
@@ -95,37 +122,66 @@ if ! mkfs.ext4 -q -d "$ROOTFS" "$ROOTFS_IMG" 2>&1; then
 fi
 echo "Rootfs image created: $(wc -c < "$ROOTFS_IMG") bytes"
 
-# Select QEMU binary and machine type
+# Select QEMU binary, machine type, drive interface, and root device
+# Different machine types expose block devices differently:
+#   - versatilepb (ARM): IDE → /dev/sda
+#   - virt (aarch64): virtio only → /dev/vda
+#   - malta (MIPS): IDE → /dev/sda
+#   - pc (x86): IDE → /dev/sda
 case "$ARCH" in
     arm|armhf|armel)
         QEMU_BIN="qemu-system-arm"
         MACHINE="versatilepb"
         CONSOLE="ttyAMA0"
+        DRIVE_IF=""
+        ROOT_DEV="/dev/sda"
+        CPU_ARGS=""
+        GUEST_RAM="256"  # versatilepb max is 256MB
         ;;
     aarch64|arm64)
         QEMU_BIN="qemu-system-aarch64"
         MACHINE="virt"
         CONSOLE="ttyAMA0"
+        DRIVE_IF=",if=virtio"
+        ROOT_DEV="/dev/vda"
+        CPU_ARGS="-cpu cortex-a57"
+        GUEST_RAM="512"
         ;;
     mips|mipsbe)
         QEMU_BIN="qemu-system-mips"
         MACHINE="malta"
         CONSOLE="ttyS0"
+        DRIVE_IF=""
+        ROOT_DEV="/dev/sda"
+        CPU_ARGS=""
+        GUEST_RAM="256"  # malta max is 256MB
         ;;
     mipsel|mipsle)
         QEMU_BIN="qemu-system-mipsel"
         MACHINE="malta"
         CONSOLE="ttyS0"
+        DRIVE_IF=""
+        ROOT_DEV="/dev/sda"
+        CPU_ARGS=""
+        GUEST_RAM="256"  # malta max is 256MB
         ;;
     x86|i386|i686)
         QEMU_BIN="qemu-system-i386"
         MACHINE="pc"
         CONSOLE="ttyS0"
+        DRIVE_IF=""
+        ROOT_DEV="/dev/sda"
+        CPU_ARGS=""
+        GUEST_RAM="512"
         ;;
     x86_64|amd64)
         QEMU_BIN="qemu-system-x86_64"
         MACHINE="pc"
         CONSOLE="ttyS0"
+        DRIVE_IF=""
+        ROOT_DEV="/dev/sda"
+        CPU_ARGS=""
+        GUEST_RAM="512"
         ;;
     *)
         echo "ERROR: Unsupported architecture: $ARCH"
@@ -139,22 +195,34 @@ if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Starting: $QEMU_BIN -M $MACHINE"
+echo "Starting: $QEMU_BIN -M $MACHINE $CPU_ARGS"
 echo "Serial console: $SERIAL_SOCK"
-echo "Kernel append: root=/dev/sda rw console=$CONSOLE"
+echo "Drive interface: ${DRIVE_IF:-default}"
+echo "Kernel append: root=$ROOT_DEV rw console=$CONSOLE"
+
+# Build optional initrd argument
+INITRD_ARGS=""
+if [ -n "$INITRD" ] && [ -f "$INITRD" ]; then
+    echo "Initrd: $INITRD ($(wc -c < "$INITRD") bytes)"
+    INITRD_ARGS="-initrd $INITRD"
+else
+    echo "Initrd: none"
+fi
 
 # Launch QEMU
 # -nodefaults: suppress audio/USB/etc warnings
 # -no-reboot: exit instead of rebooting (prevents infinite loops)
 exec "$QEMU_BIN" \
     -M "$MACHINE" \
-    -m 256 \
+    $CPU_ARGS \
+    -m "${GUEST_RAM:-256}" \
     -nographic \
     -nodefaults \
     -no-reboot \
     -serial "unix:${SERIAL_SOCK},server,nowait" \
     -monitor none \
     -kernel "$KERNEL" \
-    -drive "file=$ROOTFS_IMG,format=raw" \
-    -append "root=/dev/sda rw console=$CONSOLE panic=1" \
+    $INITRD_ARGS \
+    -drive "file=$ROOTFS_IMG,format=raw${DRIVE_IF}" \
+    -append "root=$ROOT_DEV rw console=$CONSOLE panic=0" \
     $NET_ARGS
