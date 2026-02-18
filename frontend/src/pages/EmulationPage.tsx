@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import {
   Play,
   Square,
@@ -50,6 +50,7 @@ const STATUS_CONFIG: Record<EmulationStatus, { label: string; className: string 
 
 export default function EmulationPage() {
   const { projectId } = useParams<{ projectId: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const resetChat = useChatStore((s) => s.reset)
   const [chatOpen, setChatOpen] = useState(false)
@@ -91,6 +92,17 @@ export default function EmulationPage() {
       setLoading(false)
     }
   }, [projectId, activeSession])
+
+  // Pre-fill binary path from ?binary= query parameter
+  useEffect(() => {
+    const binary = searchParams.get('binary')
+    if (binary) {
+      setBinaryPath(binary)
+      setMode('user')
+      // Clear the query param so it doesn't persist on refresh
+      setSearchParams({}, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   useEffect(() => {
     loadSessions()

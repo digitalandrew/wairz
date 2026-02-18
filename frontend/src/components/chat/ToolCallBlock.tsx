@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { ChevronRight, Wrench, Check, X, Loader2 } from 'lucide-react'
+import { ChevronRight, Wrench, Check, X, Loader2, PlayCircle } from 'lucide-react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import type { ChatDisplayMessage } from '@/types'
 
@@ -10,9 +11,15 @@ interface Props {
 
 export default function ToolCallBlock({ toolCall, toolResult }: Props) {
   const [expanded, setExpanded] = useState(false)
+  const navigate = useNavigate()
+  const { projectId } = useParams<{ projectId: string }>()
 
   const pending = !toolResult
   const isError = toolResult?.isError
+
+  // Show "Open in Emulation" for successful emulation tool calls
+  const isEmulationTool = toolCall.tool === 'start_emulation'
+  const showEmulationLink = isEmulationTool && !pending && !isError && projectId
 
   const borderColor = pending
     ? 'border-blue-500/40'
@@ -62,6 +69,15 @@ export default function ToolCallBlock({ toolCall, toolResult }: Props) {
             </div>
           )}
         </div>
+      )}
+      {showEmulationLink && (
+        <button
+          onClick={() => navigate(`/projects/${projectId}/emulation`)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-primary hover:underline"
+        >
+          <PlayCircle className="h-3.5 w-3.5" />
+          Open in Emulation
+        </button>
       )}
     </div>
   )

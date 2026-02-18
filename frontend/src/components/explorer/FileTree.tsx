@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Tree, TreeApi, type NodeRendererProps } from 'react-arborist'
-import { ChevronRight, FileText, Loader2, MessageSquare, Paperclip, Plus, Check, X } from 'lucide-react'
-import { useParams } from 'react-router-dom'
+import { ChevronRight, FileText, Loader2, MessageSquare, Paperclip, PlayCircle, Plus, Check, X } from 'lucide-react'
+import { useParams, useNavigate } from 'react-router-dom'
 import {
   useExplorerStore,
   isPlaceholder,
@@ -79,6 +79,7 @@ function Node({ node, style }: NodeRendererProps<TreeNode>) {
 
 export default function FileTree({ onRequestChat }: FileTreeProps) {
   const { projectId } = useParams<{ projectId: string }>()
+  const navigate = useNavigate()
   const {
     treeData,
     treeError,
@@ -251,6 +252,13 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     setContextMenu(null)
   }, [contextMenu, addAttachment])
 
+  const handleRunInEmulation = useCallback(() => {
+    if (!contextMenu || !projectId) return
+    const path = contextMenu.node.id
+    navigate(`/projects/${projectId}/emulation?binary=${encodeURIComponent(path)}`)
+    setContextMenu(null)
+  }, [contextMenu, projectId, navigate])
+
   // Focus new note input when shown
   useEffect(() => {
     if (showNewNote) {
@@ -404,6 +412,18 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
             <Paperclip className="h-3.5 w-3.5" />
             Attach to chat
           </button>
+          {contextMenu.node.permissions.includes('x') && (
+            <>
+              <div className="my-1 border-t border-border" />
+              <button
+                onClick={handleRunInEmulation}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent hover:text-accent-foreground"
+              >
+                <PlayCircle className="h-3.5 w-3.5" />
+                Run in Emulation
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
