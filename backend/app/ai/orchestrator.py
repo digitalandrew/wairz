@@ -97,7 +97,7 @@ DEFAULT_MODEL = "claude-sonnet-4-20250514"
 ALLOWED_MODELS = {
     "claude-haiku-4-5-20251001",
     "claude-sonnet-4-20250514",
-    "claude-opus-4-20250918",
+    "claude-opus-4-20250514",
 }
 MAX_TOKENS = 4096
 

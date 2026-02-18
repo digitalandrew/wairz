@@ -149,7 +149,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
     description: 'Balanced cost and capability, strong tool use and analysis',
   },
   {
-    id: 'claude-opus-4-20250918',
+    id: 'claude-opus-4-20250514',
     label: 'Opus 4',
     cost: 'Most expensive',
     description: 'Highest capability, best for complex RE and deep analysis',
@@ -421,7 +421,7 @@ export const REVIEW_CATEGORIES: ReviewCategoryInfo[] = [
     id: 'deep_binary_analysis',
     label: 'Deep Binary Analysis',
     description: 'Reverse engineer critical binaries with decompilation',
-    model: 'claude-opus-4-20250918',
+    model: 'claude-opus-4-20250514',
     modelLabel: 'Opus',
     defaultSelected: false,
   },

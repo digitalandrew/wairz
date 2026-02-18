@@ -163,7 +163,7 @@ Write a summary to your scratchpad.""",
         "initial_message": "Audit filesystem permissions for security issues.",
     },
     "deep_binary_analysis": {
-        "model": "claude-opus-4-20250918",
+        "model": "claude-opus-4-20250514",
         "max_iterations": 40,
         "tools": [
             "list_functions", "disassemble_function", "decompile_function",
