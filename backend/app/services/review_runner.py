@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -82,7 +82,7 @@ class ReviewRunner:
                     return
 
                 # Mark review as running
-                now = datetime.now(timezone.utc)
+                now = datetime.utcnow()
                 await svc.update_review_status(
                     self.review_id, "running", started_at=now,
                 )
@@ -107,6 +107,20 @@ class ReviewRunner:
 
             except Exception:
                 logger.exception("Failed to initialize review %s", self.review_id)
+                try:
+                    await svc.update_review_status(self.review_id, "failed")
+                    await db.commit()
+                except Exception:
+                    logger.exception("Failed to update review status to failed")
+                await self._broadcast({
+                    "event": "review_complete",
+                    "data": {"review_id": str(self.review_id), "status": "failed"},
+                })
+                for q in self._event_queues:
+                    try:
+                        q.put_nowait(None)
+                    except asyncio.QueueFull:
+                        pass
                 return
 
         # Phase 1: run category agents concurrently
@@ -128,7 +142,7 @@ class ReviewRunner:
         async with async_session_factory() as db:
             svc = ReviewService(db)
             final_status = "cancelled" if self.is_cancelled else "completed"
-            now = datetime.now(timezone.utc)
+            now = datetime.utcnow()
             await svc.update_review_status(
                 self.review_id, final_status, completed_at=now,
             )
@@ -170,7 +184,7 @@ class ReviewRunner:
                     svc = ReviewService(db)
 
                     # Mark agent as running
-                    now = datetime.now(timezone.utc)
+                    now = datetime.utcnow()
                     await svc.update_agent(agent_id, status="running", started_at=now)
                     await db.commit()
 
@@ -274,7 +288,7 @@ class ReviewRunner:
 
                     # Update agent status
                     final_status = "cancelled" if self.is_cancelled else "completed"
-                    now = datetime.now(timezone.utc)
+                    now = datetime.utcnow()
                     await svc.update_agent(
                         agent_id,
                         status=final_status,
@@ -298,7 +312,7 @@ class ReviewRunner:
 
                 except Exception as exc:
                     logger.exception("Agent %s failed", category)
-                    now = datetime.now(timezone.utc)
+                    now = datetime.utcnow()
                     try:
                         await svc.update_agent(
                             agent_id,

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.agent_config import AGENT_CONFIGS
-from app.database import get_db
+from app.database import async_session_factory, get_db
 from app.models.project import Project
 from app.schemas.review import ReviewCreate, ReviewResponse
 from app.services.review_runner import ReviewManager
@@ -121,12 +121,29 @@ async def stream_review(
             })
             return
 
-        # If no active runner, just send current status
+        # If no active runner and review is in a non-terminal state,
+        # it's an orphan (runner crashed without updating status).
+        # Mark it as failed and send terminal event so EventSource stops.
         if not runner:
-            yield _sse_format("review_status_change", {
-                "review_id": str(review_id),
-                "status": review.status,
-            })
+            if review.status in ("pending", "running"):
+                # Orphaned review — mark failed in DB
+                try:
+                    async with async_session_factory() as fail_db:
+                        fail_svc = ReviewService(fail_db)
+                        await fail_svc.update_review_status(review_id, "failed")
+                        await fail_db.commit()
+                except Exception:
+                    logger.warning("Could not mark orphaned review %s as failed", review_id)
+                yield _sse_format("review_complete", {
+                    "review_id": str(review_id),
+                    "status": "failed",
+                    "error": "Review runner is no longer active. Please start a new review.",
+                })
+            else:
+                yield _sse_format("review_complete", {
+                    "review_id": str(review_id),
+                    "status": review.status,
+                })
             return
 
         queue = runner.subscribe()
