@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { MessageSquare, X, Send, Loader2, Paperclip, FileText, ChevronDown } from 'lucide-react'
+import { MessageSquare, X, Send, Loader2, Paperclip, FileText, ChevronDown, SquarePen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useChatStore } from '@/stores/chatStore'
 import { useExplorerStore } from '@/stores/explorerStore'
@@ -176,8 +176,17 @@ export default function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         <Button
           variant="ghost"
           size="icon-xs"
-          onClick={onToggle}
+          onClick={() => useChatStore.getState().reset()}
           className="ml-auto"
+          disabled={isStreaming || messages.length === 0}
+          title="New conversation"
+        >
+          <SquarePen className="h-4 w-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={onToggle}
         >
           <X className="h-4 w-4" />
         </Button>

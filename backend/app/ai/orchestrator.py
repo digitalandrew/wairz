@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -21,6 +23,118 @@ ALLOWED_MODELS = {
     "claude-opus-4-20250918",
 }
 MAX_TOKENS = 4096
+
+# Chars-per-token estimate for rough token counting (conservative)
+_CHARS_PER_TOKEN = 3.5
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count estimate based on character length."""
+    return int(len(text) / _CHARS_PER_TOKEN)
+
+
+def _estimate_message_tokens(message: dict) -> int:
+    """Estimate token count for a single conversation message."""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return _estimate_tokens(content)
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if isinstance(block, dict):
+                # Serialize the block to get a rough size
+                total += _estimate_tokens(json.dumps(block, default=str))
+            else:
+                total += _estimate_tokens(str(block))
+        return total
+    return _estimate_tokens(str(content))
+
+
+def trim_messages(messages: list[dict], max_tokens: int) -> list[dict]:
+    """Trim conversation history to fit within a token budget.
+
+    Strategy:
+    - Always keep the first user message (original context)
+    - Always keep the last 4 messages (current exchange)
+    - If the first user message is the same as one of the kept tail messages,
+      don't duplicate it
+    - Remove oldest messages from the middle until under budget
+    """
+    if not messages:
+        return messages
+
+    # Estimate total tokens
+    total = sum(_estimate_message_tokens(m) for m in messages)
+    if total <= max_tokens:
+        return messages
+
+    logger.info(
+        "Trimming conversation: ~%d tokens exceeds budget of %d",
+        total, max_tokens,
+    )
+
+    # Always keep first message and last 4 messages
+    keep_tail = min(4, len(messages))
+
+    if len(messages) <= keep_tail + 1:
+        # Too few messages to trim meaningfully
+        return messages
+
+    first_msg = messages[0]
+    tail_msgs = messages[-keep_tail:]
+
+    # Try progressively removing messages from the middle
+    # Start from the oldest (after first) and remove until under budget
+    middle = messages[1:-keep_tail]
+    removed_count = 0
+
+    # Calculate budget used by first + tail
+    first_tokens = _estimate_message_tokens(first_msg)
+    tail_tokens = sum(_estimate_message_tokens(m) for m in tail_msgs)
+    remaining_budget = max_tokens - first_tokens - tail_tokens
+
+    # Keep middle messages from the end (most recent) working backwards
+    kept_middle: list[dict] = []
+    budget_used = 0
+    for msg in reversed(middle):
+        msg_tokens = _estimate_message_tokens(msg)
+        if budget_used + msg_tokens <= remaining_budget:
+            kept_middle.insert(0, msg)
+            budget_used += msg_tokens
+        else:
+            removed_count += 1
+
+    result = [first_msg] + kept_middle + tail_msgs
+
+    # Ensure valid message alternation: messages must alternate user/assistant.
+    # The trimming may break this, so fix up by merging adjacent same-role messages.
+    result = _fix_message_alternation(result)
+
+    final_tokens = sum(_estimate_message_tokens(m) for m in result)
+    logger.info(
+        "Trimmed conversation from ~%d to ~%d tokens (%d messages removed)",
+        total, final_tokens, removed_count,
+    )
+    return result
+
+
+def _fix_message_alternation(messages: list[dict]) -> list[dict]:
+    """Ensure messages alternate between user and assistant roles.
+
+    If trimming produces adjacent messages with the same role, drop the older
+    duplicate to maintain valid conversation structure.
+    """
+    if len(messages) <= 1:
+        return messages
+
+    fixed: list[dict] = [messages[0]]
+    for msg in messages[1:]:
+        if msg["role"] == fixed[-1]["role"]:
+            # Same role in sequence - keep the newer one (replace)
+            fixed[-1] = msg
+        else:
+            fixed.append(msg)
+    return fixed
 
 
 @dataclass
@@ -46,9 +160,77 @@ class AIOrchestrator:
         settings = get_settings()
         self._registry = registry
         self._max_iterations = max_iterations or settings.max_tool_iterations
+        try:
+            self._max_context_tokens = int(settings.ai_max_context_tokens)
+        except (TypeError, ValueError, AttributeError):
+            self._max_context_tokens = 100_000
+        try:
+            max_retries = int(settings.ai_max_retries)
+        except (TypeError, ValueError, AttributeError):
+            max_retries = 3
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key or settings.anthropic_api_key,
+            max_retries=max_retries,
         )
+
+    async def _stream_with_retry(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        on_event: Callable[[dict], Awaitable[None]],
+        max_retries: int = 3,
+    ):
+        """Stream an API call with retry logic for rate limit errors.
+
+        The Anthropic SDK's built-in retry handles most transient errors,
+        but for 429 specifically we add extra backoff with user notification.
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                async with self._client.messages.stream(
+                    model=model,
+                    max_tokens=MAX_TOKENS,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                ) as stream:
+                    async for text in stream.text_stream:
+                        await on_event({
+                            "type": "assistant_text",
+                            "content": text,
+                            "delta": True,
+                        })
+                    response = await stream.get_final_message()
+                    return response
+
+            except anthropic.RateLimitError as exc:
+                if attempt >= max_retries:
+                    raise
+
+                # Extract retry-after hint if available
+                retry_after = getattr(exc, "headers", {})
+                wait_seconds = 30
+                if hasattr(retry_after, "get"):
+                    try:
+                        wait_seconds = int(retry_after.get("retry-after", 30))
+                    except (ValueError, TypeError):
+                        pass
+                # Minimum 10s, cap at 120s
+                wait_seconds = max(10, min(wait_seconds, 120))
+
+                logger.warning(
+                    "Rate limited (attempt %d/%d), waiting %ds before retry",
+                    attempt + 1, max_retries + 1, wait_seconds,
+                )
+                await on_event({
+                    "type": "assistant_text",
+                    "content": f"\n\n[Rate limited - waiting {wait_seconds}s before retry ({attempt + 1}/{max_retries + 1})...]\n\n",
+                    "delta": False,
+                })
+                await asyncio.sleep(wait_seconds)
 
     async def run_conversation(
         self,
@@ -87,6 +269,16 @@ class AIOrchestrator:
         resolved_model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
 
         tools = self._registry.get_anthropic_tools()
+
+        # Estimate fixed overhead (system prompt + tool definitions)
+        tools_json = json.dumps(tools, default=str)
+        overhead_tokens = _estimate_tokens(system_prompt) + _estimate_tokens(tools_json)
+        # Budget for messages = total budget minus overhead, with margin for output
+        message_budget = self._max_context_tokens - overhead_tokens - MAX_TOKENS
+
+        # Trim conversation history to fit within budget
+        messages = trim_messages(messages, max(message_budget, 10000))
+
         iteration = 0
 
         try:
@@ -100,23 +292,13 @@ class AIOrchestrator:
                     await on_event({"type": "done"})
                     return messages
 
-                # Stream the API response
-                async with self._client.messages.stream(
+                response = await self._stream_with_retry(
                     model=resolved_model,
-                    max_tokens=MAX_TOKENS,
                     system=system_prompt,
                     messages=messages,
                     tools=tools,
-                ) as stream:
-                    # Emit text deltas as they arrive
-                    async for text in stream.text_stream:
-                        await on_event({
-                            "type": "assistant_text",
-                            "content": text,
-                            "delta": True,
-                        })
-
-                    response = await stream.get_final_message()
+                    on_event=on_event,
+                )
 
                 # Append full assistant message to conversation
                 messages.append({
@@ -171,11 +353,23 @@ class AIOrchestrator:
                 # Append tool results as a user message and continue the loop
                 messages.append({"role": "user", "content": tool_results})
 
+                # Re-trim if the conversation has grown during the tool loop
+                messages = trim_messages(messages, max(message_budget, 10000))
+
             # Reached max iterations
             await on_event({
                 "type": "assistant_text",
                 "content": "\n\n[Reached maximum tool call limit]",
                 "delta": False,
+            })
+            await on_event({"type": "done"})
+            return messages
+
+        except anthropic.RateLimitError as exc:
+            logger.warning("Rate limit exceeded after retries: %s", exc)
+            await on_event({
+                "type": "error",
+                "content": "Rate limit exceeded. Please wait a minute and try again.",
             })
             await on_event({"type": "done"})
             return messages

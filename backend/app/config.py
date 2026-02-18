@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     emulation_image: str = "wairz-emulation"
     emulation_kernel_dir: str = "/opt/kernels"
     emulation_network: str = "wairz_emulation_net"
+    ai_max_retries: int = 3
+    ai_max_context_tokens: int = 100000
     log_level: str = "INFO"
 
 
