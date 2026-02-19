@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import hashlib
 import logging
+import os
 import sys
 import uuid
 
@@ -39,6 +40,12 @@ from app.models.firmware import Firmware
 from app.models.project import Project
 from app.utils.sandbox import validate_path
 
+# Docker volume path translation
+# When the backend runs inside Docker it stores paths like /data/firmware/...
+# but the MCP server runs on the host where that path doesn't exist.
+# We detect this and resolve the Docker volume mountpoint automatically.
+DOCKER_STORAGE_ROOT = "/data/firmware"
+
 # All logging goes to stderr — stdout is the MCP protocol channel
 logging.basicConfig(
     stream=sys.stderr,
@@ -51,6 +58,65 @@ logger = logging.getLogger("wairz.mcp")
 # - cleanup_decompiled_code: calls the Anthropic API internally; the MCP client IS the AI
 # - write_scratchpad / read_agent_scratchpads: review-only (not in create_tool_registry anyway)
 EXCLUDED_TOOLS = {"cleanup_decompiled_code"}
+
+
+def _resolve_storage_root() -> str | None:
+    """Find a host-accessible path for the firmware Docker volume.
+
+    When the MCP server runs on the host (not inside Docker), DB paths
+    like /data/firmware/... don't exist.  We attempt several strategies:
+
+    1. If DOCKER_STORAGE_ROOT exists on this machine (we're inside
+       Docker or have a bind mount), no translation needed.
+    2. Check STORAGE_ROOT from settings — it may point to a local dev
+       directory (e.g., ./data/firmware).
+    3. Inspect the Docker volume's host mountpoint — requires the
+       directory to be readable by the current user.
+
+    Returns the host-side path or None if no translation is possible.
+    """
+    # Strategy 1: Docker-internal path exists (running inside Docker)
+    if os.path.isdir(DOCKER_STORAGE_ROOT):
+        return None
+
+    # Strategy 2: Settings-based STORAGE_ROOT (local dev setup)
+    settings = get_settings()
+    if settings.storage_root != DOCKER_STORAGE_ROOT:
+        resolved = os.path.realpath(settings.storage_root)
+        if os.path.isdir(resolved):
+            return resolved
+
+    # Strategy 3: Docker volume mountpoint (requires read access)
+    try:
+        import docker as docker_sdk
+
+        client = docker_sdk.from_env()
+        for vol_name in ("wairz_firmware_data", "firmware_data"):
+            try:
+                vol = client.volumes.get(vol_name)
+                mountpoint = vol.attrs.get("Mountpoint", "")
+                if mountpoint and os.path.isdir(mountpoint):
+                    return mountpoint
+            except docker_sdk.errors.NotFound:
+                continue
+    except Exception as exc:
+        logger.debug("Could not inspect Docker volumes: %s", exc)
+
+    return None
+
+
+def _translate_path(path: str, host_storage_root: str | None) -> str:
+    """Rewrite a Docker-internal path to the host-side equivalent.
+
+    If host_storage_root is None, returns path unchanged.
+    """
+    if not host_storage_root:
+        return path
+    if path.startswith(DOCKER_STORAGE_ROOT + "/"):
+        return host_storage_root + path[len(DOCKER_STORAGE_ROOT):]
+    if path == DOCKER_STORAGE_ROOT:
+        return host_storage_root
+    return path
 
 
 def _compute_sha256(file_path: str) -> str:
@@ -198,6 +264,33 @@ async def run_server(project_id: uuid.UUID) -> None:
         endianness = firmware.endianness
         extracted_path = firmware.extracted_path
 
+    # Translate Docker-internal paths to host paths when running outside Docker.
+    # The DB stores paths like /data/firmware/... which only exist inside
+    # the Docker container.  On the host we resolve via the Docker volume
+    # or the local STORAGE_ROOT setting.
+    host_storage_root = _resolve_storage_root()
+    if host_storage_root:
+        extracted_path = _translate_path(extracted_path, host_storage_root)
+        logger.info(
+            "Path translation active: %s → %s",
+            DOCKER_STORAGE_ROOT,
+            host_storage_root,
+        )
+
+    if not os.path.isdir(extracted_path):
+        logger.error(
+            "Extracted firmware path does not exist: %s",
+            extracted_path,
+        )
+        logger.error(
+            "The database stores Docker-internal paths. To fix this, either:\n"
+            "  1. Run the MCP server inside Docker:\n"
+            "     docker exec -i wairz-backend-1 uv run wairz-mcp --project-id %s\n"
+            "  2. Set STORAGE_ROOT in .env to point to a local copy of the firmware data",
+            project_id,
+        )
+        sys.exit(1)
+
     logger.info(
         "Loaded project '%s' — firmware: %s (%s, %s)",
         project_name,
@@ -205,6 +298,7 @@ async def run_server(project_id: uuid.UUID) -> None:
         architecture or "unknown arch",
         endianness or "unknown endian",
     )
+    logger.info("Firmware root: %s", extracted_path)
 
     # Build tool registry
     registry = _build_tool_registry()
