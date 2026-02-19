@@ -191,8 +191,14 @@ class EmulationService:
         by the kernel without the binary needing to be accessible from the
         process's mount namespace.
 
+        Docker containers see an empty ``/proc/sys/fs/binfmt_misc`` by default
+        (it's not the host's mount), so the privileged container must first
+        ``mount -t binfmt_misc`` to access the real kernel entries.
+
         This is a host-level operation (binfmt_misc is kernel-wide) and
         persists until the host reboots or the entry is explicitly removed.
+        A flag file in ``/tmp`` avoids re-running the privileged container
+        on every emulation start within the same backend container lifetime.
 
         Failures are logged as warnings but never raised — user-mode
         emulation still works for the initial shell; only child processes
@@ -209,20 +215,13 @@ class EmulationService:
             return
 
         binfmt_name, registration = entry
-        binfmt_path = f"/proc/sys/fs/binfmt_misc/{binfmt_name}"
 
-        # Already registered — nothing to do
-        if os.path.exists(binfmt_path):
-            logger.debug("binfmt_misc already registered: %s", binfmt_name)
-            return
-
-        # binfmt_misc filesystem must be mounted
-        if not os.path.isdir("/proc/sys/fs/binfmt_misc"):
-            logger.warning(
-                "binfmt_misc filesystem not mounted — cannot register %s. "
-                "Child processes may fail with 'Exec format error'.",
-                binfmt_name,
-            )
+        # Check local flag file — avoids running a privileged container on
+        # every emulation start.  The flag persists within this backend
+        # container's lifetime (cleared on container restart).
+        flag_file = f"/tmp/.binfmt_registered_{binfmt_name}"
+        if os.path.exists(flag_file):
+            logger.debug("binfmt_misc already registered (cached): %s", binfmt_name)
             return
 
         logger.info(
@@ -232,28 +231,45 @@ class EmulationService:
 
         client = self._get_docker_client()
         try:
-            # Run a short-lived privileged container to write the registration.
+            # Run a short-lived privileged container that:
+            # 1. Mounts binfmt_misc (Docker containers don't see the host's mount)
+            # 2. Checks if the entry already exists (idempotent)
+            # 3. Registers if needed
             # Must be privileged because Docker's default seccomp profile blocks
             # writes to /proc/sys even with the SYS_ADMIN capability.
             # The F flag causes the kernel to open /usr/bin/qemu-{arch}-static
             # from within this container's filesystem and cache the fd.
-            client.containers.run(
+            result = client.containers.run(
                 image=self._settings.emulation_image,
                 command=[
                     "sh", "-c",
-                    f"echo '{registration}' > /proc/sys/fs/binfmt_misc/register",
+                    "mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null; "
+                    f"if [ -f /proc/sys/fs/binfmt_misc/{binfmt_name} ]; then "
+                    "echo ALREADY_REGISTERED; "
+                    "else "
+                    f"echo '{registration}' > /proc/sys/fs/binfmt_misc/register 2>&1 "
+                    "&& echo REGISTERED || echo FAILED; "
+                    "fi",
                 ],
                 remove=True,
                 privileged=True,
             )
 
-            # Verify registration took effect
-            if os.path.exists(binfmt_path):
-                logger.info("binfmt_misc registered successfully: %s", binfmt_name)
+            output = result.decode("utf-8", errors="replace").strip()
+
+            if "REGISTERED" in output or "ALREADY_REGISTERED" in output:
+                # Create flag file so subsequent calls skip the privileged container
+                try:
+                    with open(flag_file, "w") as f:
+                        f.write("1")
+                except OSError:
+                    pass  # Non-critical — just means we'll check again next time
+                logger.info("binfmt_misc for %s: %s", binfmt_name, output)
             else:
                 logger.warning(
-                    "binfmt_misc registration command succeeded but entry not found: %s",
+                    "binfmt_misc registration for %s returned unexpected output: %s",
                     binfmt_name,
+                    output,
                 )
         except Exception as exc:
             logger.warning(
