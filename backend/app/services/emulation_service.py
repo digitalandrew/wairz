@@ -7,6 +7,7 @@ Uses the Docker SDK to spawn isolated containers running QEMU in user-mode
 import asyncio
 import logging
 import os
+import platform
 import shlex
 from datetime import datetime, timezone
 from uuid import UUID
@@ -53,6 +54,55 @@ ARCH_ALIASES: dict[str, str] = {
     "x86_64": "x86_64",
     "amd64": "x86_64",
 }
+
+# binfmt_misc registration entries for each architecture.
+# Format: ":name:type:offset:magic:mask:interpreter:flags"
+# Flags: F = fix binary (kernel caches interpreter fd — works in chroots/containers)
+#        P = preserve argv[0]
+#        C = use caller's credentials
+# The \x sequences are interpreted by the kernel's binfmt_misc parser, not the shell.
+# Mask \xfe on e_type byte matches both ET_EXEC (2) and ET_DYN (3) for PIE support.
+BINFMT_ENTRIES: dict[str, tuple[str, str]] = {
+    "arm": (
+        "qemu-arm",
+        r":qemu-arm:M::\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        r"\x02\x00\x28\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff"
+        r"\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-arm-static:FPC",
+    ),
+    "aarch64": (
+        "qemu-aarch64",
+        r":qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00"
+        r"\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff"
+        r"\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:FPC",
+    ),
+    "mips": (
+        "qemu-mips",
+        r":qemu-mips:M::\x7fELF\x01\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        r"\x00\x02\x00\x08:\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00"
+        r"\x00\x00\x00\xff\xfe\xff\xff:/usr/bin/qemu-mips-static:FPC",
+    ),
+    "mipsel": (
+        "qemu-mipsel",
+        r":qemu-mipsel:M::\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00"
+        r"\x00\x02\x00\x08\x00:\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x00"
+        r"\x00\x00\x00\x00\xfe\xff\xff\xff:/usr/bin/qemu-mipsel-static:FPC",
+    ),
+    "x86": (
+        "qemu-i386",
+        r":qemu-i386:M::\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        r"\x02\x00\x03\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff"
+        r"\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-i386-static:FPC",
+    ),
+    "x86_64": (
+        "qemu-x86_64",
+        r":qemu-x86_64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00"
+        r"\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff"
+        r"\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-x86_64-static:FPC",
+    ),
+}
+
+# Detect host architecture so we can skip binfmt_misc for native binaries
+_HOST_ARCH = ARCH_ALIASES.get(platform.machine())
 
 
 def _validate_kernel_file(path: str) -> tuple[bool, str]:
@@ -129,6 +179,90 @@ class EmulationService:
         if not arch:
             return None
         return ARCH_ALIASES.get(arch, arch.lower())
+
+    def _ensure_binfmt_misc(self, arch: str) -> None:
+        """Register binfmt_misc for the target architecture if not already present.
+
+        Uses a short-lived privileged Docker container to register the QEMU
+        user-mode interpreter with the kernel's binfmt_misc subsystem.  The
+        ``F`` (fix binary) flag causes the kernel to cache the interpreter's
+        file descriptor at registration time, so it works transparently inside
+        chroots and containers — any execve() of a foreign-arch ELF is handled
+        by the kernel without the binary needing to be accessible from the
+        process's mount namespace.
+
+        This is a host-level operation (binfmt_misc is kernel-wide) and
+        persists until the host reboots or the entry is explicitly removed.
+
+        Failures are logged as warnings but never raised — user-mode
+        emulation still works for the initial shell; only child processes
+        would fail with "Exec format error".
+        """
+        # Skip for the host's native architecture — the kernel handles it
+        if arch == _HOST_ARCH:
+            logger.debug("Skipping binfmt_misc for native architecture: %s", arch)
+            return
+
+        entry = BINFMT_ENTRIES.get(arch)
+        if not entry:
+            logger.debug("No binfmt_misc entry defined for architecture: %s", arch)
+            return
+
+        binfmt_name, registration = entry
+        binfmt_path = f"/proc/sys/fs/binfmt_misc/{binfmt_name}"
+
+        # Already registered — nothing to do
+        if os.path.exists(binfmt_path):
+            logger.debug("binfmt_misc already registered: %s", binfmt_name)
+            return
+
+        # binfmt_misc filesystem must be mounted
+        if not os.path.isdir("/proc/sys/fs/binfmt_misc"):
+            logger.warning(
+                "binfmt_misc filesystem not mounted — cannot register %s. "
+                "Child processes may fail with 'Exec format error'.",
+                binfmt_name,
+            )
+            return
+
+        logger.info(
+            "Registering binfmt_misc for %s (requires privileged container)...",
+            binfmt_name,
+        )
+
+        client = self._get_docker_client()
+        try:
+            # Run a short-lived privileged container to write the registration.
+            # Must be privileged because Docker's default seccomp profile blocks
+            # writes to /proc/sys even with the SYS_ADMIN capability.
+            # The F flag causes the kernel to open /usr/bin/qemu-{arch}-static
+            # from within this container's filesystem and cache the fd.
+            client.containers.run(
+                image=self._settings.emulation_image,
+                command=[
+                    "sh", "-c",
+                    f"echo '{registration}' > /proc/sys/fs/binfmt_misc/register",
+                ],
+                remove=True,
+                privileged=True,
+            )
+
+            # Verify registration took effect
+            if os.path.exists(binfmt_path):
+                logger.info("binfmt_misc registered successfully: %s", binfmt_name)
+            else:
+                logger.warning(
+                    "binfmt_misc registration command succeeded but entry not found: %s",
+                    binfmt_name,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Could not register binfmt_misc for %s: %s. "
+                "Child processes in user-mode emulation may fail with 'Exec format error'. "
+                "To fix manually: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes",
+                binfmt_name,
+                exc,
+            )
 
     async def _count_active_sessions(self, project_id: UUID) -> int:
         result = await self.db.scalar(
@@ -605,10 +739,12 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
             # Fix permissions — binwalk extraction may lose execute bits.
             self._fix_firmware_permissions(container)
 
-        # For user mode, copy qemu-static into the firmware rootfs so chroot works.
-        # This enables `chroot /firmware /qemu-mipsel-static /bin/sh` which makes
-        # all firmware paths (e.g. /bin/cnsl_safe) resolve correctly.
+        # For user mode, ensure binfmt_misc is registered for the target
+        # architecture so child processes (spawned by the QEMU-emulated shell)
+        # are automatically handled by the kernel via the cached qemu-static fd.
+        # Then copy qemu-static into the firmware rootfs for the explicit chroot.
         if session.mode == "user":
+            self._ensure_binfmt_misc(session.architecture or "arm")
             arch = session.architecture or "arm"
             qemu_bin = QEMU_USER_BIN_MAP.get(arch, "qemu-arm-static")
             container.exec_run([
