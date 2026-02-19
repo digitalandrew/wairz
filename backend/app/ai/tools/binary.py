@@ -1,14 +1,11 @@
-"""Binary analysis AI tools using radare2, pyelftools, and Ghidra."""
+"""Binary analysis AI tools using Ghidra and pyelftools."""
 
 import logging
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
-from app.services.analysis_service import (
-    check_binary_protections,
-    get_session_cache,
-)
+from app.services.analysis_service import check_binary_protections
 from app.services.code_cleanup_service import cleanup_decompiled_code
-from app.services.ghidra_service import decompile_function
+from app.services.ghidra_service import decompile_function, get_analysis_cache
 from app.utils.sandbox import validate_path
 
 logger = logging.getLogger(__name__)
@@ -18,9 +15,8 @@ async def _handle_list_functions(input: dict, context: ToolContext) -> str:
     """List functions found in a binary, sorted by size (largest first)."""
     path = validate_path(context.extracted_path, input["binary_path"])
 
-    cache = get_session_cache()
-    session = await cache.get_session(path)
-    functions = session.list_functions()
+    cache = get_analysis_cache()
+    functions = await cache.get_functions(path, context.firmware_id, context.db)
 
     if not functions:
         return "No functions found in binary."
@@ -29,8 +25,8 @@ async def _handle_list_functions(input: dict, context: ToolContext) -> str:
     for fn in functions:
         name = fn.get("name", "unknown")
         size = fn.get("size", 0)
-        offset = fn.get("offset", 0)
-        lines.append(f"  0x{offset:08x}  {size:>6} bytes  {name}")
+        address = fn.get("address", "0")
+        lines.append(f"  {address}  {size:>6} bytes  {name}")
 
     return "\n".join(lines)
 
@@ -41,9 +37,10 @@ async def _handle_disassemble_function(input: dict, context: ToolContext) -> str
     function_name = input["function_name"]
     max_insn = input.get("num_instructions", 100)
 
-    cache = get_session_cache()
-    session = await cache.get_session(path)
-    disasm = session.disassemble_function(function_name, max_insn)
+    cache = get_analysis_cache()
+    disasm = await cache.get_disassembly(
+        path, function_name, context.firmware_id, context.db, max_insn,
+    )
 
     return f"Disassembly of {function_name}:\n\n{disasm}"
 
@@ -52,9 +49,8 @@ async def _handle_list_imports(input: dict, context: ToolContext) -> str:
     """List imported symbols, grouped by library."""
     path = validate_path(context.extracted_path, input["binary_path"])
 
-    cache = get_session_cache()
-    session = await cache.get_session(path)
-    imports = session.get_imports()
+    cache = get_analysis_cache()
+    imports = await cache.get_imports(path, context.firmware_id, context.db)
 
     if not imports:
         return "No imports found."
@@ -62,7 +58,7 @@ async def _handle_list_imports(input: dict, context: ToolContext) -> str:
     # Group by library
     by_lib: dict[str, list[str]] = {}
     for imp in imports:
-        lib = imp.get("lib", "unknown")
+        lib = imp.get("library") or "unknown"
         name = imp.get("name", "unknown")
         by_lib.setdefault(lib, []).append(name)
 
@@ -80,9 +76,8 @@ async def _handle_list_exports(input: dict, context: ToolContext) -> str:
     """List exported symbols."""
     path = validate_path(context.extracted_path, input["binary_path"])
 
-    cache = get_session_cache()
-    session = await cache.get_session(path)
-    exports = session.get_exports()
+    cache = get_analysis_cache()
+    exports = await cache.get_exports(path, context.firmware_id, context.db)
 
     if not exports:
         return "No exports found."
@@ -90,9 +85,8 @@ async def _handle_list_exports(input: dict, context: ToolContext) -> str:
     lines = [f"Found {len(exports)} export(s):", ""]
     for exp in exports:
         name = exp.get("name", "unknown")
-        vaddr = exp.get("vaddr", 0)
-        size = exp.get("size", 0)
-        lines.append(f"  0x{vaddr:08x}  {size:>6} bytes  {name}")
+        address = exp.get("address", "0")
+        lines.append(f"  {address}  {name}")
 
     return "\n".join(lines)
 
@@ -102,19 +96,19 @@ async def _handle_xrefs_to(input: dict, context: ToolContext) -> str:
     path = validate_path(context.extracted_path, input["binary_path"])
     target = input["address_or_symbol"]
 
-    cache = get_session_cache()
-    session = await cache.get_session(path)
-    xrefs = session.get_xrefs_to(target)
+    cache = get_analysis_cache()
+    xrefs = await cache.get_xrefs_to(path, target, context.firmware_id, context.db)
 
     if not xrefs:
         return f"No cross-references to '{target}' found."
 
     lines = [f"Found {len(xrefs)} cross-reference(s) to '{target}':", ""]
     for xref in xrefs:
-        from_addr = xref.get("from", 0)
+        from_addr = xref.get("from", "unknown")
         ref_type = xref.get("type", "unknown")
-        opcode = xref.get("opcode", "")
-        lines.append(f"  0x{from_addr:08x}  [{ref_type}]  {opcode}")
+        from_func = xref.get("from_func", "")
+        func_info = f"  ({from_func})" if from_func else ""
+        lines.append(f"  {from_addr}  [{ref_type}]{func_info}")
 
     return "\n".join(lines)
 
@@ -124,19 +118,19 @@ async def _handle_xrefs_from(input: dict, context: ToolContext) -> str:
     path = validate_path(context.extracted_path, input["binary_path"])
     target = input["address_or_symbol"]
 
-    cache = get_session_cache()
-    session = await cache.get_session(path)
-    xrefs = session.get_xrefs_from(target)
+    cache = get_analysis_cache()
+    xrefs = await cache.get_xrefs_from(path, target, context.firmware_id, context.db)
 
     if not xrefs:
         return f"No cross-references from '{target}' found."
 
     lines = [f"Found {len(xrefs)} cross-reference(s) from '{target}':", ""]
     for xref in xrefs:
-        to_addr = xref.get("to", 0)
+        to_addr = xref.get("to", "unknown")
         ref_type = xref.get("type", "unknown")
-        opcode = xref.get("opcode", "")
-        lines.append(f"  0x{to_addr:08x}  [{ref_type}]  {opcode}")
+        to_func = xref.get("to_func", "")
+        func_info = f"  ({to_func})" if to_func else ""
+        lines.append(f"  {to_addr}  [{ref_type}]{func_info}")
 
     return "\n".join(lines)
 
@@ -145,9 +139,8 @@ async def _handle_get_binary_info(input: dict, context: ToolContext) -> str:
     """Get binary metadata: architecture, format, entry point, etc."""
     path = validate_path(context.extracted_path, input["binary_path"])
 
-    cache = get_session_cache()
-    session = await cache.get_session(path)
-    info = session.get_binary_info()
+    cache = get_analysis_cache()
+    info = await cache.get_binary_info(path, context.firmware_id, context.db)
 
     if not info:
         return "Could not retrieve binary info."
@@ -262,16 +255,21 @@ async def _handle_cleanup_decompiled_code(input: dict, context: ToolContext) -> 
     except RuntimeError as exc:
         return f"Error: {exc}"
 
-    # Get R2 context (best-effort)
+    # Get Ghidra context (best-effort)
     binary_info = None
     imports = None
     try:
-        cache = get_session_cache()
-        session = await cache.get_session(path)
-        binary_info = session.get_binary_info()
-        imports = session.get_imports()
+        cache = get_analysis_cache()
+        binary_info = await cache.get_binary_info(path, context.firmware_id, context.db)
+        raw_imports = await cache.get_imports(path, context.firmware_id, context.db)
+        # Reshape imports to match the format cleanup_service expects
+        if raw_imports:
+            imports = [
+                {"name": imp.get("name", ""), "lib": imp.get("library", "unknown")}
+                for imp in raw_imports
+            ]
     except Exception:
-        logger.debug("Could not get R2 context for cleanup tool, proceeding without it")
+        logger.debug("Could not get Ghidra context for cleanup tool, proceeding without it")
 
     # Run AI cleanup
     try:
@@ -299,7 +297,8 @@ def register_binary_tools(registry: ToolRegistry) -> None:
             "List all functions found in an ELF binary, sorted by size "
             "(largest first). Large custom functions are often the most "
             "interesting for security analysis. Max 500 functions. "
-            "Requires radare2 analysis which may take 10-30s on first call."
+            "First call for a binary triggers Ghidra analysis (1-3 minutes); "
+            "subsequent calls are instant from cache."
         ),
         input_schema={
             "type": "object",
@@ -318,8 +317,8 @@ def register_binary_tools(registry: ToolRegistry) -> None:
         name="disassemble_function",
         description=(
             "Disassemble a function from an ELF binary. Shows the assembly "
-            "instructions with addresses and annotations. Use list_functions "
-            "first to find function names."
+            "instructions with addresses. Use list_functions first to find "
+            "function names. Results come from Ghidra analysis cache."
         ),
         input_schema={
             "type": "object",
@@ -330,7 +329,7 @@ def register_binary_tools(registry: ToolRegistry) -> None:
                 },
                 "function_name": {
                     "type": "string",
-                    "description": "Function name or address to disassemble (e.g. 'main', 'sym.auth_check')",
+                    "description": "Function name to disassemble (e.g. 'main', 'auth_check')",
                 },
                 "num_instructions": {
                     "type": "integer",
@@ -348,10 +347,10 @@ def register_binary_tools(registry: ToolRegistry) -> None:
             "Decompile a function from an ELF binary into pseudo-C code using "
             "Ghidra. This produces high-level C-like output that is much easier "
             "to read than assembly. Use list_functions first to find function "
-            "names. Results are cached — first call for a binary may take 30-120s, "
-            "subsequent calls for the same binary are instant. Best for "
-            "understanding complex logic, finding vulnerabilities in source-like "
-            "form, and analyzing authentication/crypto routines."
+            "names. Results are cached — first call for a binary may take 1-3 "
+            "minutes, subsequent calls are instant. Best for understanding "
+            "complex logic, finding vulnerabilities, and analyzing "
+            "authentication/crypto routines."
         ),
         input_schema={
             "type": "object",
@@ -375,7 +374,7 @@ def register_binary_tools(registry: ToolRegistry) -> None:
         description=(
             "List imported symbols from an ELF binary, grouped by library. "
             "Useful for identifying dangerous functions (system, strcpy, "
-            "gets) and external dependencies."
+            "gets) and external dependencies. Uses Ghidra analysis cache."
         ),
         input_schema={
             "type": "object",
@@ -393,8 +392,8 @@ def register_binary_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="list_exports",
         description=(
-            "List exported symbols from an ELF binary. Shows symbol names, "
-            "addresses, and sizes."
+            "List exported symbols from an ELF binary. Shows symbol names "
+            "and addresses. Uses Ghidra analysis cache."
         ),
         input_schema={
             "type": "object",
@@ -412,9 +411,9 @@ def register_binary_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="xrefs_to",
         description=(
-            "Find all cross-references TO a given address or symbol in a "
-            "binary. Shows where in the code this function/address is called "
-            "or referenced from."
+            "Find all cross-references TO a given function or symbol in a "
+            "binary. Shows where in the code this function is called or "
+            "referenced from, including the caller function name."
         ),
         input_schema={
             "type": "object",
@@ -425,7 +424,7 @@ def register_binary_tools(registry: ToolRegistry) -> None:
                 },
                 "address_or_symbol": {
                     "type": "string",
-                    "description": "Target address (0x...) or symbol name",
+                    "description": "Target function name or address (0x...)",
                 },
             },
             "required": ["binary_path", "address_or_symbol"],
@@ -436,9 +435,9 @@ def register_binary_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="xrefs_from",
         description=(
-            "Find all cross-references FROM a given address or symbol in a "
-            "binary. Shows what functions/addresses are called or referenced "
-            "by the target."
+            "Find all cross-references FROM a given function or symbol in a "
+            "binary. Shows what functions are called or referenced by the "
+            "target, including the callee function name."
         ),
         input_schema={
             "type": "object",
@@ -449,7 +448,7 @@ def register_binary_tools(registry: ToolRegistry) -> None:
                 },
                 "address_or_symbol": {
                     "type": "string",
-                    "description": "Source address (0x...) or symbol name",
+                    "description": "Source function name or address (0x...)",
                 },
             },
             "required": ["binary_path", "address_or_symbol"],
@@ -461,7 +460,8 @@ def register_binary_tools(registry: ToolRegistry) -> None:
         name="get_binary_info",
         description=(
             "Get detailed metadata about an ELF binary: architecture, "
-            "endianness, format, linked libraries, entry point, and more."
+            "endianness, format, linked libraries, entry point, and more. "
+            "Uses Ghidra analysis cache."
         ),
         input_schema={
             "type": "object",

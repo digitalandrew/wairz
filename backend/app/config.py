@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     max_tool_iterations: int = 25
     ghidra_path: str = "/opt/ghidra"
     ghidra_scripts_path: str = "/opt/ghidra_scripts"
-    ghidra_timeout: int = 120
+    ghidra_timeout: int = 300
     nvd_api_key: str = ""
     emulation_timeout_minutes: int = 30
     emulation_max_sessions: int = 3

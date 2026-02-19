@@ -9,13 +9,13 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.services.analysis_service import (
-    check_binary_protections,
-    get_session_cache,
-)
+from app.services.analysis_service import check_binary_protections
 from app.services.code_cleanup_service import cleanup_decompiled_code
 from app.services.firmware_service import FirmwareService
-from app.services.ghidra_service import decompile_function as ghidra_decompile
+from app.services.ghidra_service import (
+    decompile_function as ghidra_decompile,
+    get_analysis_cache,
+)
 from app.utils.sandbox import validate_path
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ async def _resolve_firmware(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """Resolve project → firmware, return firmware record."""
+    """Resolve project -> firmware, return firmware record."""
     svc = FirmwareService(db)
     firmware = await svc.get_by_project(project_id)
     if not firmware:
@@ -44,6 +44,7 @@ async def _resolve_firmware(
 async def list_functions(
     path: str = Query(..., description="Path to ELF binary in firmware filesystem"),
     firmware=Depends(_resolve_firmware),
+    db: AsyncSession = Depends(get_db),
 ):
     """List functions found in an ELF binary, sorted by size (largest first)."""
     try:
@@ -51,21 +52,20 @@ async def list_functions(
     except Exception:
         raise HTTPException(403, "Invalid path")
 
-    cache = get_session_cache()
+    cache = get_analysis_cache()
     try:
-        session = await cache.get_session(full_path)
-    except asyncio.TimeoutError:
+        functions = await cache.get_functions(full_path, firmware.id, db)
+    except TimeoutError:
         raise HTTPException(504, "Binary analysis timed out")
     except Exception as e:
         raise HTTPException(400, f"Failed to analyze binary: {e}")
 
-    functions = session.list_functions()
     return {
         "binary_path": path,
         "functions": [
             {
                 "name": fn.get("name", "unknown"),
-                "offset": fn.get("offset", 0),
+                "offset": fn.get("address", "0"),
                 "size": fn.get("size", 0),
             }
             for fn in functions
@@ -105,9 +105,7 @@ def _resolve_elf_imports(binary_path: str, extracted_root: str) -> list[dict]:
     """Parse ELF imports and resolve each to its source library.
 
     For each needed library, reads its exports and cross-references
-    with the binary's undefined symbols.  Returns entries keyed by
-    both the raw name and r2's ``sym.imp.`` prefixed name so the
-    frontend can match either convention.
+    with the binary's undefined symbols.
     """
     import os
     from elftools.elf.elffile import ELFFile
@@ -179,17 +177,14 @@ def _resolve_elf_imports(binary_path: str, extracted_root: str) -> list[dict]:
         except Exception:
             continue
 
-    # 4. Build result with both raw and sym.imp. names
+    # 4. Build result
     results: list[dict] = []
     for sym_name, lib_name in func_to_lib.items():
         results.append({"name": sym_name, "libname": lib_name})
-        results.append({"name": f"sym.imp.{sym_name}", "libname": lib_name})
 
-    # Also include unresolved imports (no library found) so the column
-    # isn't misleading about what's an import vs local function
+    # Also include unresolved imports (no library found)
     for sym_name in undefined_syms - func_to_lib.keys():
         results.append({"name": sym_name, "libname": None})
-        results.append({"name": f"sym.imp.{sym_name}", "libname": None})
 
     return results
 
@@ -214,6 +209,7 @@ async def disassemble_function(
     function: str = Query(..., description="Function name to disassemble"),
     max_instructions: int = Query(100, ge=1, le=200),
     firmware=Depends(_resolve_firmware),
+    db: AsyncSession = Depends(get_db),
 ):
     """Disassemble a function from an ELF binary."""
     try:
@@ -221,18 +217,15 @@ async def disassemble_function(
     except Exception:
         raise HTTPException(403, "Invalid path")
 
-    cache = get_session_cache()
+    cache = get_analysis_cache()
     try:
-        session = await cache.get_session(full_path)
-    except asyncio.TimeoutError:
+        disasm = await cache.get_disassembly(
+            full_path, function, firmware.id, db, max_instructions,
+        )
+    except TimeoutError:
         raise HTTPException(504, "Binary analysis timed out")
     except Exception as e:
         raise HTTPException(400, f"Failed to analyze binary: {e}")
-
-    loop = asyncio.get_event_loop()
-    disasm = await loop.run_in_executor(
-        None, session.disassemble_function, function, max_instructions
-    )
 
     return {
         "binary_path": path,
@@ -245,6 +238,7 @@ async def disassemble_function(
 async def get_binary_info(
     path: str = Query(..., description="Path to ELF binary"),
     firmware=Depends(_resolve_firmware),
+    db: AsyncSession = Depends(get_db),
 ):
     """Get binary metadata and security protections."""
     try:
@@ -252,15 +246,14 @@ async def get_binary_info(
     except Exception:
         raise HTTPException(403, "Invalid path")
 
-    cache = get_session_cache()
+    cache = get_analysis_cache()
     try:
-        session = await cache.get_session(full_path)
-    except asyncio.TimeoutError:
+        info = await cache.get_binary_info(full_path, firmware.id, db)
+    except TimeoutError:
         raise HTTPException(504, "Binary analysis timed out")
     except Exception as e:
         raise HTTPException(400, f"Failed to analyze binary: {e}")
 
-    info = session.get_binary_info()
     protections = check_binary_protections(full_path)
 
     return {
@@ -326,16 +319,20 @@ async def cleanup_code(
     except RuntimeError as e:
         raise HTTPException(400, str(e))
 
-    # Get binary context (best-effort — proceed with None if R2 fails)
+    # Get binary context from Ghidra cache (best-effort)
     binary_info = None
     imports = None
     try:
-        cache = get_session_cache()
-        session = await cache.get_session(full_path)
-        binary_info = session.get_binary_info()
-        imports = session.get_imports()
+        cache = get_analysis_cache()
+        binary_info = await cache.get_binary_info(full_path, firmware.id, db)
+        raw_imports = await cache.get_imports(full_path, firmware.id, db)
+        if raw_imports:
+            imports = [
+                {"name": imp.get("name", ""), "lib": imp.get("library", "unknown")}
+                for imp in raw_imports
+            ]
     except Exception:
-        logger.debug("Could not get R2 context for cleanup, proceeding without it")
+        logger.debug("Could not get Ghidra context for cleanup, proceeding without it")
 
     # Run AI cleanup
     try:

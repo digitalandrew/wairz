@@ -109,8 +109,8 @@ async def cleanup_decompiled_code(
         raw_code: Raw decompiled C code from Ghidra.
         function_name: Name of the function being cleaned.
         binary_path: Absolute path to the binary on disk.
-        binary_info: R2 binary info dict (optional, best-effort).
-        imports: R2 imports list (optional, best-effort).
+        binary_info: Binary info dict (optional, best-effort).
+        imports: Imports list (optional, best-effort).
         firmware_id: UUID of the firmware for cache keying.
         db: Async database session.
 

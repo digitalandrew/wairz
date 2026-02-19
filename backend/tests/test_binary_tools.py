@@ -9,10 +9,7 @@ import pytest
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.ai.tools.binary import register_binary_tools
-from app.services.analysis_service import (
-    R2SessionCache,
-    check_binary_protections,
-)
+from app.services.analysis_service import check_binary_protections
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +177,7 @@ def registry() -> ToolRegistry:
 
 
 # ---------------------------------------------------------------------------
-# check_binary_protections tests (pyelftools, no r2 needed)
+# check_binary_protections tests (pyelftools, no external tools needed)
 # ---------------------------------------------------------------------------
 
 
@@ -362,113 +359,23 @@ class TestPathTraversal:
 
 
 # ---------------------------------------------------------------------------
-# R2SessionCache tests (no actual r2 needed — we mock R2Session)
-# ---------------------------------------------------------------------------
-
-
-class TestR2SessionCache:
-    @pytest.mark.asyncio
-    async def test_cache_stores_session(self):
-        cache = R2SessionCache(max_size=3)
-
-        mock_session = MagicMock()
-        with patch(
-            "app.services.analysis_service.R2Session",
-            return_value=mock_session,
-        ):
-            session = await cache.get_session("/fake/binary1")
-            assert session is mock_session
-            assert cache.size == 1
-
-    @pytest.mark.asyncio
-    async def test_cache_returns_same_session(self):
-        cache = R2SessionCache(max_size=3)
-
-        mock_session = MagicMock()
-        with patch(
-            "app.services.analysis_service.R2Session",
-            return_value=mock_session,
-        ):
-            s1 = await cache.get_session("/fake/binary1")
-            s2 = await cache.get_session("/fake/binary1")
-            assert s1 is s2
-            assert cache.size == 1
-
-    @pytest.mark.asyncio
-    async def test_cache_evicts_oldest(self):
-        cache = R2SessionCache(max_size=2)
-
-        sessions = [MagicMock() for _ in range(3)]
-        call_count = 0
-
-        def make_session(path):
-            nonlocal call_count
-            s = sessions[call_count]
-            call_count += 1
-            return s
-
-        with patch(
-            "app.services.analysis_service.R2Session",
-            side_effect=make_session,
-        ):
-            await cache.get_session("/fake/binary1")
-            await cache.get_session("/fake/binary2")
-            assert cache.size == 2
-
-            # This should evict binary1
-            await cache.get_session("/fake/binary3")
-            assert cache.size == 2
-            # First session should have been closed
-            sessions[0].close.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_close_all(self):
-        cache = R2SessionCache(max_size=5)
-
-        mock_sessions = [MagicMock() for _ in range(3)]
-        call_count = 0
-
-        def make_session(path):
-            nonlocal call_count
-            s = mock_sessions[call_count]
-            call_count += 1
-            return s
-
-        with patch(
-            "app.services.analysis_service.R2Session",
-            side_effect=make_session,
-        ):
-            await cache.get_session("/fake/binary1")
-            await cache.get_session("/fake/binary2")
-            await cache.get_session("/fake/binary3")
-
-        await cache.close_all()
-        assert cache.size == 0
-        for s in mock_sessions:
-            s.close.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Handler formatting tests (mock r2pipe)
+# Handler formatting tests (mock GhidraAnalysisCache)
 # ---------------------------------------------------------------------------
 
 
 class TestHandlerFormatting:
     @pytest.mark.asyncio
     async def test_list_functions_format(self, registry, tool_context):
-        mock_session = MagicMock()
-        mock_session.list_functions.return_value = [
-            {"name": "main", "size": 200, "offset": 0x1000},
-            {"name": "auth_check", "size": 150, "offset": 0x2000},
-        ]
+        mock_cache = MagicMock()
+        mock_cache.get_functions = AsyncMock(return_value=[
+            {"name": "main", "size": 200, "address": "00001000"},
+            {"name": "auth_check", "size": 150, "address": "00002000"},
+        ])
 
         with patch(
-            "app.ai.tools.binary.get_session_cache"
-        ) as mock_cache_fn:
-            mock_cache = MagicMock()
-            mock_cache.get_session = AsyncMock(return_value=mock_session)
-            mock_cache_fn.return_value = mock_cache
-
+            "app.ai.tools.binary.get_analysis_cache",
+            return_value=mock_cache,
+        ):
             result = await registry.execute(
                 "list_functions",
                 {"binary_path": "/usr/bin/httpd"},
@@ -478,12 +385,12 @@ class TestHandlerFormatting:
         assert "Found 2 function(s)" in result
         assert "main" in result
         assert "auth_check" in result
-        assert "0x00001000" in result
+        assert "00001000" in result
 
     @pytest.mark.asyncio
     async def test_get_binary_info_format(self, registry, tool_context):
-        mock_session = MagicMock()
-        mock_session.get_binary_info.return_value = {
+        mock_cache = MagicMock()
+        mock_cache.get_binary_info = AsyncMock(return_value={
             "core": {},
             "bin": {
                 "file": "/usr/bin/httpd",
@@ -499,15 +406,12 @@ class TestHandlerFormatting:
                 "static": False,
                 "libs": ["libc.so.6", "libpthread.so.0"],
             },
-        }
+        })
 
         with patch(
-            "app.ai.tools.binary.get_session_cache"
-        ) as mock_cache_fn:
-            mock_cache = MagicMock()
-            mock_cache.get_session = AsyncMock(return_value=mock_session)
-            mock_cache_fn.return_value = mock_cache
-
+            "app.ai.tools.binary.get_analysis_cache",
+            return_value=mock_cache,
+        ):
             result = await registry.execute(
                 "get_binary_info",
                 {"binary_path": "/usr/bin/httpd"},
@@ -521,20 +425,17 @@ class TestHandlerFormatting:
 
     @pytest.mark.asyncio
     async def test_list_imports_format(self, registry, tool_context):
-        mock_session = MagicMock()
-        mock_session.get_imports.return_value = [
-            {"name": "system", "lib": "libc.so.6"},
-            {"name": "printf", "lib": "libc.so.6"},
-            {"name": "pthread_create", "lib": "libpthread.so.0"},
-        ]
+        mock_cache = MagicMock()
+        mock_cache.get_imports = AsyncMock(return_value=[
+            {"name": "system", "library": "libc.so.6"},
+            {"name": "printf", "library": "libc.so.6"},
+            {"name": "pthread_create", "library": "libpthread.so.0"},
+        ])
 
         with patch(
-            "app.ai.tools.binary.get_session_cache"
-        ) as mock_cache_fn:
-            mock_cache = MagicMock()
-            mock_cache.get_session = AsyncMock(return_value=mock_session)
-            mock_cache_fn.return_value = mock_cache
-
+            "app.ai.tools.binary.get_analysis_cache",
+            return_value=mock_cache,
+        ):
             result = await registry.execute(
                 "list_imports",
                 {"binary_path": "/usr/bin/httpd"},
@@ -547,17 +448,57 @@ class TestHandlerFormatting:
         assert "[libpthread.so.0]" in result
 
     @pytest.mark.asyncio
-    async def test_no_functions_message(self, registry, tool_context):
-        mock_session = MagicMock()
-        mock_session.list_functions.return_value = []
+    async def test_list_exports_format(self, registry, tool_context):
+        mock_cache = MagicMock()
+        mock_cache.get_exports = AsyncMock(return_value=[
+            {"name": "main", "address": "00001000"},
+            {"name": "init", "address": "00002000"},
+        ])
 
         with patch(
-            "app.ai.tools.binary.get_session_cache"
-        ) as mock_cache_fn:
-            mock_cache = MagicMock()
-            mock_cache.get_session = AsyncMock(return_value=mock_session)
-            mock_cache_fn.return_value = mock_cache
+            "app.ai.tools.binary.get_analysis_cache",
+            return_value=mock_cache,
+        ):
+            result = await registry.execute(
+                "list_exports",
+                {"binary_path": "/usr/bin/httpd"},
+                tool_context,
+            )
 
+        assert "Found 2 export(s)" in result
+        assert "main" in result
+        assert "00001000" in result
+
+    @pytest.mark.asyncio
+    async def test_xrefs_to_format(self, registry, tool_context):
+        mock_cache = MagicMock()
+        mock_cache.get_xrefs_to = AsyncMock(return_value=[
+            {"from": "00003000", "type": "UNCONDITIONAL_CALL", "from_func": "entry"},
+        ])
+
+        with patch(
+            "app.ai.tools.binary.get_analysis_cache",
+            return_value=mock_cache,
+        ):
+            result = await registry.execute(
+                "xrefs_to",
+                {"binary_path": "/usr/bin/httpd", "address_or_symbol": "main"},
+                tool_context,
+            )
+
+        assert "Found 1 cross-reference(s) to 'main'" in result
+        assert "00003000" in result
+        assert "UNCONDITIONAL_CALL" in result
+
+    @pytest.mark.asyncio
+    async def test_no_functions_message(self, registry, tool_context):
+        mock_cache = MagicMock()
+        mock_cache.get_functions = AsyncMock(return_value=[])
+
+        with patch(
+            "app.ai.tools.binary.get_analysis_cache",
+            return_value=mock_cache,
+        ):
             result = await registry.execute(
                 "list_functions",
                 {"binary_path": "/usr/bin/httpd"},
@@ -565,6 +506,26 @@ class TestHandlerFormatting:
             )
 
         assert "No functions found" in result
+
+    @pytest.mark.asyncio
+    async def test_disassembly_format(self, registry, tool_context):
+        mock_cache = MagicMock()
+        mock_cache.get_disassembly = AsyncMock(
+            return_value="00001000  push rbp\n00001001  mov rbp, rsp"
+        )
+
+        with patch(
+            "app.ai.tools.binary.get_analysis_cache",
+            return_value=mock_cache,
+        ):
+            result = await registry.execute(
+                "disassemble_function",
+                {"binary_path": "/usr/bin/httpd", "function_name": "main"},
+                tool_context,
+            )
+
+        assert "Disassembly of main" in result
+        assert "push rbp" in result
 
 
 # ---------------------------------------------------------------------------

@@ -37,11 +37,6 @@ RUN pip3 install --no-cache-dir --break-system-packages \
        git+https://github.com/devttys0/yaffshiv.git 2>/dev/null \
     || echo "WARN: yaffshiv install failed — YAFFS extraction won't work"
 
-# Install radare2 from GitHub releases (not in Debian Trixie repos)
-RUN curl -fsSL https://github.com/radareorg/radare2/releases/download/5.9.8/radare2_5.9.8_amd64.deb -o /tmp/radare2.deb \
-    && dpkg -i /tmp/radare2.deb || apt-get install -f -y \
-    && rm /tmp/radare2.deb
-
 # Install sasquatch for non-standard SquashFS (vendor-modified)
 # Try the devttys0 fork first; patch out -Werror to handle newer compiler warnings
 RUN git clone https://github.com/devttys0/sasquatch.git /tmp/sasquatch \
