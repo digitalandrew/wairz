@@ -39,6 +39,7 @@ class EmulationSessionResponse(BaseModel):
 class EmulationExecRequest(BaseModel):
     command: str
     timeout: int = Field(default=30, ge=1, le=120)
+    environment: dict[str, str] | None = None
 
 
 class EmulationExecResponse(BaseModel):

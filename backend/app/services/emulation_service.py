@@ -548,17 +548,6 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
             if initrd_backend_path:
                 logger.info("Found initrd: %s", initrd_backend_path)
 
-        # Build the command for the container (kernel path will be updated below)
-        if session.mode == "user":
-            cmd = [
-                "/opt/scripts/start-user-mode.sh",
-                session.architecture or "arm",
-                "/firmware",
-                session.binary_path or "",
-            ]
-            if session.arguments:
-                cmd.extend(session.arguments.split())
-
         # Container-internal path where the kernel will be placed
         CONTAINER_KERNEL_PATH = "/tmp/kernel"
 
@@ -578,6 +567,7 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
                 mem_limit=f"{settings.emulation_memory_limit_mb}m",
                 nano_cpus=int(settings.emulation_cpu_limit * 1e9),
                 privileged=False,
+                cap_add=["SYS_ADMIN"],
                 network_mode="bridge",
                 labels=common_labels,
             )
@@ -607,12 +597,36 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
                 mem_limit=f"{settings.emulation_memory_limit_mb}m",
                 nano_cpus=int(settings.emulation_cpu_limit * 1e9),
                 privileged=False,
+                cap_add=["SYS_ADMIN"],
                 network_mode="bridge",
                 labels=common_labels,
             )
 
             # Fix permissions — binwalk extraction may lose execute bits.
             self._fix_firmware_permissions(container)
+
+        # For user mode, copy qemu-static into the firmware rootfs so chroot works.
+        # This enables `chroot /firmware /qemu-mipsel-static /bin/sh` which makes
+        # all firmware paths (e.g. /bin/cnsl_safe) resolve correctly.
+        if session.mode == "user":
+            arch = session.architecture or "arm"
+            qemu_bin = QEMU_USER_BIN_MAP.get(arch, "qemu-arm-static")
+            container.exec_run([
+                "sh", "-c",
+                f"cp $(which {qemu_bin}) /firmware/{qemu_bin} && "
+                f"chmod +x /firmware/{qemu_bin}"
+            ])
+            # Ensure /proc and /dev exist for binaries that need them
+            container.exec_run([
+                "sh", "-c",
+                "mkdir -p /firmware/proc /firmware/dev /firmware/tmp /firmware/sys && "
+                "mount -t proc proc /firmware/proc 2>/dev/null || true && "
+                "mount --bind /dev /firmware/dev 2>/dev/null || true"
+            ])
+            logger.info(
+                "User-mode chroot prepared: copied %s into /firmware/",
+                qemu_bin,
+            )
 
         # For system mode, copy the kernel into the container and launch QEMU
         if session.mode == "system":
@@ -830,9 +844,14 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
 
     @staticmethod
     def build_user_shell_cmd(arch: str) -> list[str]:
-        """Return the command list for an interactive QEMU user-mode shell."""
+        """Return the command list for an interactive QEMU user-mode shell.
+
+        Uses chroot so all firmware paths work naturally (e.g., /bin/foo
+        resolves to /firmware/bin/foo). The qemu-static binary was copied
+        into /firmware/ during session setup.
+        """
         qemu_bin = QEMU_USER_BIN_MAP.get(arch, "qemu-arm-static")
-        return [qemu_bin, "-L", "/firmware", "/firmware/bin/sh"]
+        return ["chroot", "/firmware", f"/{qemu_bin}", "/bin/sh"]
 
     async def stop_session(self, session_id: UUID) -> EmulationSession:
         """Stop an emulation session and remove its container."""
@@ -868,6 +887,7 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
         session_id: UUID,
         command: str,
         timeout: int = 30,
+        environment: dict[str, str] | None = None,
     ) -> dict:
         """Execute a command inside a running emulation session."""
         result = await self.db.execute(
@@ -892,26 +912,38 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
             await self.db.flush()
             raise ValueError("Container not found — session may have been terminated")
 
-        # Build exec command — for user mode, use qemu-static with -L flag.
-        # Wrap with `timeout` for enforcement (Docker SDK exec_run has no
-        # timeout parameter).
+        # Build exec command.
+        # User mode: chroot into /firmware so all firmware paths work naturally.
+        # The qemu-static binary was copied into /firmware/ during session start.
+        # System mode: send command through QEMU's serial console socket.
+        #
+        # Environment variables are prepended as shell exports so they're
+        # available to the command inside the chroot/emulated system.
+        env_prefix = ""
+        if environment:
+            exports = " ".join(
+                f"export {shlex.quote(k)}={shlex.quote(v)};"
+                for k, v in environment.items()
+            )
+            env_prefix = exports + " "
+
         if session.mode == "user":
             arch = session.architecture or "arm"
             qemu_bin = QEMU_USER_BIN_MAP.get(arch, "qemu-arm-static")
             exec_cmd = [
                 "timeout", str(timeout),
-                qemu_bin,
-                "-L", "/firmware",
-                "/firmware/bin/sh", "-c", command,
+                "chroot", "/firmware",
+                f"/{qemu_bin}", "/bin/sh", "-c", env_prefix + command,
             ]
         else:
             # System mode: send command through QEMU's serial console socket.
             # This is inherently messy (serial console mixes prompts/output),
             # but it executes inside the emulated firmware instead of the
             # host container.
+            full_cmd = env_prefix + command if env_prefix else command
             exec_cmd = [
                 "sh", "-c",
-                f"echo {shlex.quote(command)} | timeout {timeout} socat - UNIX-CONNECT:/tmp/qemu-serial.sock",
+                f"echo {shlex.quote(full_cmd)} | timeout {timeout} socat - UNIX-CONNECT:/tmp/qemu-serial.sock",
             ]
 
         try:

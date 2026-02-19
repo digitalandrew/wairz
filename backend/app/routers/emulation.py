@@ -102,6 +102,7 @@ async def exec_in_emulation(
             session_id=session_id,
             command=request.command,
             timeout=request.timeout,
+            environment=request.environment,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))

@@ -164,6 +164,14 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
                     "type": "integer",
                     "description": "Command timeout in seconds (default 30, max 120)",
                 },
+                "environment": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Environment variables to set for this command "
+                        "(e.g., {\"LD_LIBRARY_PATH\": \"/lib\", \"DEBUG\": \"1\"})"
+                    ),
+                },
             },
             "required": ["session_id", "command"],
         },
@@ -356,6 +364,7 @@ async def _handle_run_command(input: dict, context: ToolContext) -> str:
     session_id = input.get("session_id")
     command = input.get("command")
     timeout = min(input.get("timeout", 30), 120)
+    environment = input.get("environment")
 
     if not session_id or not command:
         return "Error: session_id and command are required."
@@ -367,6 +376,7 @@ async def _handle_run_command(input: dict, context: ToolContext) -> str:
             session_id=UUID(session_id),
             command=command,
             timeout=timeout,
+            environment=environment,
         )
     except ValueError as exc:
         return f"Error: {exc}"
