@@ -83,14 +83,15 @@ async def get_component_map(
         for e in graph.edges
     ]
 
-    # Store in cache
-    cache_entry = AnalysisCache(
-        firmware_id=firmware.id,
-        operation="component_map",
-        result={"nodes": nodes_data, "edges": edges_data, "truncated": graph.truncated},
-    )
-    db.add(cache_entry)
-    await db.commit()
+    # Store in cache (only if we found components — avoid caching empty results)
+    if nodes_data:
+        cache_entry = AnalysisCache(
+            firmware_id=firmware.id,
+            operation="component_map",
+            result={"nodes": nodes_data, "edges": edges_data, "truncated": graph.truncated},
+        )
+        db.add(cache_entry)
+        await db.commit()
 
     return ComponentGraphResponse(
         nodes=[ComponentNodeResponse(**n) for n in nodes_data],
