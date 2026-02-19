@@ -5,7 +5,6 @@ import type {
   DisassemblyResponse,
   DecompilationResponse,
   BinaryInfoResponse,
-  CodeCleanupResponse,
 } from '@/types'
 
 export async function listFunctions(
@@ -66,14 +65,3 @@ export async function getBinaryInfo(
   return data
 }
 
-export async function cleanupCode(
-  projectId: string,
-  binaryPath: string,
-  functionName: string,
-): Promise<CodeCleanupResponse> {
-  const { data } = await apiClient.post<CodeCleanupResponse>(
-    `/projects/${projectId}/analysis/cleanup`,
-    { binary_path: binaryPath, function_name: functionName },
-  )
-  return data
-}

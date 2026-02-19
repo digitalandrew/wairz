@@ -1,19 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Tree, TreeApi, type NodeRendererProps } from 'react-arborist'
-import { ChevronRight, FileText, Loader2, MessageSquare, Paperclip, PlayCircle, Plus, Check, X } from 'lucide-react'
+import { ChevronRight, FileText, Loader2, PlayCircle, Plus, Check, X } from 'lucide-react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   useExplorerStore,
   isPlaceholder,
   type TreeNode,
 } from '@/stores/explorerStore'
-import { useChatStore } from '@/stores/chatStore'
 import { getFileIcon } from '@/utils/fileIcons'
 import { formatFileSize } from '@/utils/format'
-
-interface FileTreeProps {
-  onRequestChat?: () => void
-}
 
 interface ContextMenuState {
   x: number
@@ -77,7 +72,7 @@ function Node({ node, style }: NodeRendererProps<TreeNode>) {
   )
 }
 
-export default function FileTree({ onRequestChat }: FileTreeProps) {
+export default function FileTree() {
   const { projectId } = useParams<{ projectId: string }>()
   const navigate = useNavigate()
   const {
@@ -94,7 +89,6 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     selectDocument,
     createNote,
   } = useExplorerStore()
-  const addAttachment = useChatStore((s) => s.addAttachment)
   const [showNewNote, setShowNewNote] = useState(false)
   const [newNoteTitle, setNewNoteTitle] = useState('')
   const newNoteInputRef = useRef<HTMLInputElement>(null)
@@ -236,21 +230,6 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
     },
     [treeData],
   )
-
-  const handleAskAI = useCallback(() => {
-    if (!contextMenu) return
-    const node = contextMenu.node
-    addAttachment({ path: node.id, name: node.name })
-    setContextMenu(null)
-    onRequestChat?.()
-  }, [contextMenu, addAttachment, onRequestChat])
-
-  const handleAttachToChat = useCallback(() => {
-    if (!contextMenu) return
-    const node = contextMenu.node
-    addAttachment({ path: node.id, name: node.name })
-    setContextMenu(null)
-  }, [contextMenu, addAttachment])
 
   const handleRunInEmulation = useCallback(() => {
     if (!contextMenu || !projectId) return
@@ -398,20 +377,6 @@ export default function FileTree({ onRequestChat }: FileTreeProps) {
           className="fixed z-50 min-w-[180px] rounded-md border border-border bg-popover py-1 text-sm shadow-md"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
-          <button
-            onClick={handleAskAI}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent hover:text-accent-foreground"
-          >
-            <MessageSquare className="h-3.5 w-3.5" />
-            Ask AI about this file
-          </button>
-          <button
-            onClick={handleAttachToChat}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent hover:text-accent-foreground"
-          >
-            <Paperclip className="h-3.5 w-3.5" />
-            Attach to chat
-          </button>
           {contextMenu.node.permissions.includes('x') && (
             <>
               <div className="my-1 border-t border-border" />

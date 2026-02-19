@@ -54,10 +54,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("wairz.mcp")
 
-# Tools that should NOT be exposed via MCP:
-# - cleanup_decompiled_code: calls the Anthropic API internally; the MCP client IS the AI
-# - write_scratchpad / read_agent_scratchpads: review-only (not in create_tool_registry anyway)
-EXCLUDED_TOOLS = {"cleanup_decompiled_code"}
+# Tools that should NOT be exposed via MCP (currently none after orchestrator removal).
+EXCLUDED_TOOLS: set[str] = set()
 
 
 def _resolve_storage_root() -> str | None:

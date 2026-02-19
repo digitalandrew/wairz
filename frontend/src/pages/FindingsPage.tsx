@@ -2,16 +2,13 @@ import { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
 import { ShieldAlert, Loader2 } from 'lucide-react'
 import { listFindings, updateFinding, deleteFinding } from '@/api/findings'
-import { useChatStore } from '@/stores/chatStore'
 import type { Finding, FindingUpdate, Severity, FindingStatus, FindingSource } from '@/types'
 import FindingsList from '@/components/findings/FindingsList'
 import FindingDetail from '@/components/findings/FindingDetail'
 import ReportExport from '@/components/findings/ReportExport'
-import ChatPanel from '@/components/chat/ChatPanel'
 
 export default function FindingsPage() {
   const { projectId } = useParams<{ projectId: string }>()
-  const resetChat = useChatStore((s) => s.reset)
 
   const [findings, setFindings] = useState<Finding[]>([])
   const [loading, setLoading] = useState(true)
@@ -19,7 +16,6 @@ export default function FindingsPage() {
   const [severityFilter, setSeverityFilter] = useState<Severity | null>(null)
   const [statusFilter, setStatusFilter] = useState<FindingStatus | null>(null)
   const [sourceFilter, setSourceFilter] = useState<FindingSource | null>(null)
-  const [chatOpen, setChatOpen] = useState(false)
 
   const fetchFindings = useCallback(async () => {
     if (!projectId) return
@@ -40,10 +36,6 @@ export default function FindingsPage() {
   useEffect(() => {
     fetchFindings()
   }, [fetchFindings])
-
-  useEffect(() => {
-    return () => resetChat()
-  }, [resetChat])
 
   const handleSelect = useCallback((finding: Finding) => {
     setSelectedId((prev) => (prev === finding.id ? null : finding.id))
@@ -108,7 +100,7 @@ export default function FindingsPage() {
       </div>
 
       {/* Center panel: finding detail */}
-      <div className="relative flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         {selectedFinding ? (
           <div className="flex-1 overflow-y-auto p-6">
             <FindingDetail
@@ -124,15 +116,7 @@ export default function FindingsPage() {
             <p className="text-sm">Select a finding to view details</p>
           </div>
         )}
-        {!chatOpen && (
-          <ChatPanel isOpen={false} onToggle={() => setChatOpen(true)} />
-        )}
       </div>
-
-      {/* Right panel: chat */}
-      {chatOpen && (
-        <ChatPanel isOpen={true} onToggle={() => setChatOpen(false)} />
-      )}
     </div>
   )
 }

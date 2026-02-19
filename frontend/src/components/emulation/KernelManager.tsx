@@ -7,12 +7,10 @@ import {
   ChevronUp,
   HardDrive,
   AlertCircle,
-  MessageSquare,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
-import { useChatStore } from '@/stores/chatStore'
 import { listKernels, uploadKernel, deleteKernel } from '@/api/kernels'
 import type { KernelInfo } from '@/types'
 
@@ -23,7 +21,6 @@ interface KernelManagerProps {
   firmwareKernelPath: string | null
   onKernelSelect: (name: string | null) => void
   selectedKernel: string | null
-  onRequestChat?: () => void
 }
 
 function formatSize(bytes: number): string {
@@ -37,9 +34,7 @@ export default function KernelManager({
   firmwareKernelPath,
   onKernelSelect,
   selectedKernel,
-  onRequestChat,
 }: KernelManagerProps) {
-  const setPendingMessage = useChatStore((s) => s.setPendingMessage)
 
   const [kernels, setKernels] = useState<KernelInfo[]>([])
   const [loading, setLoading] = useState(true)
@@ -125,18 +120,6 @@ export default function KernelManager({
     }
   }
 
-  const handleAskAI = useCallback(() => {
-    const arch = firmwareArchitecture || 'the detected architecture'
-    const prompt =
-      `I need help finding a pre-built Linux kernel for system-mode emulation of this firmware. ` +
-      `The firmware architecture is ${arch}. ` +
-      `Please use the list_available_kernels tool to check what's currently available. ` +
-      `If no matching kernel is found, find a suitable kernel from a trusted source ` +
-      `and use the download_kernel tool to install it. Please explain your choice before downloading.`
-    setPendingMessage(prompt)
-    onRequestChat?.()
-  }, [firmwareArchitecture, setPendingMessage, onRequestChat])
-
   const handleFileDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setDragActive(false)
@@ -189,22 +172,12 @@ export default function KernelManager({
 
       {/* Empty state — only show warning if no firmware kernel AND no uploaded kernels */}
       {matchingKernels.length === 0 && !firmwareKernelPath && (
-        <div className="space-y-2">
-          <div className="flex items-start gap-2 rounded-md bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600 dark:text-yellow-400">
-            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <div>
-              No kernels available{firmwareArchitecture ? ` for ${firmwareArchitecture}` : ''}.
-              System-mode emulation requires a pre-built Linux kernel. Upload one below,
-              or ask the AI assistant for help.
-            </div>
+        <div className="flex items-start gap-2 rounded-md bg-yellow-500/10 px-3 py-2 text-xs text-yellow-600 dark:text-yellow-400">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div>
+            No kernels available{firmwareArchitecture ? ` for ${firmwareArchitecture}` : ''}.
+            System-mode emulation requires a pre-built Linux kernel. Upload one below.
           </div>
-          <button
-            onClick={handleAskAI}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/10 transition-colors"
-          >
-            <MessageSquare className="h-3.5 w-3.5" />
-            Get AI Help Finding a Kernel
-          </button>
         </div>
       )}
 

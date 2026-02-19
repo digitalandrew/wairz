@@ -1,19 +1,15 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { Loader2, AlertTriangle } from 'lucide-react'
 import { getComponentMap } from '@/api/componentMap'
-import { useChatStore } from '@/stores/chatStore'
 import type { ComponentGraph } from '@/types'
 import ComponentMap from '@/components/component-map/ComponentMap'
-import ChatPanel from '@/components/chat/ChatPanel'
 
 export default function ComponentMapPage() {
   const { projectId } = useParams<{ projectId: string }>()
-  const resetChat = useChatStore((s) => s.reset)
   const [graph, setGraph] = useState<ComponentGraph | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [chatOpen, setChatOpen] = useState(false)
 
   useEffect(() => {
     if (!projectId) return
@@ -38,13 +34,8 @@ export default function ComponentMapPage() {
 
     return () => {
       cancelled = true
-      resetChat()
     }
-  }, [projectId, resetChat])
-
-  const handleRequestChat = useCallback(() => {
-    setChatOpen(true)
-  }, [])
+  }, [projectId])
 
   if (loading) {
     return (
@@ -81,20 +72,9 @@ export default function ComponentMapPage() {
 
   return (
     <div className="-m-6 flex h-[calc(100vh-3.5rem)]">
-      {/* Main panel: component map */}
       <div className="relative min-w-0 flex-1">
-        <ComponentMap graph={graph} onRequestChat={handleRequestChat} />
-
-        {/* Chat toggle — bottom-right */}
-        {!chatOpen && (
-          <ChatPanel isOpen={false} onToggle={() => setChatOpen(true)} />
-        )}
+        <ComponentMap graph={graph} />
       </div>
-
-      {/* Right panel: chat */}
-      {chatOpen && (
-        <ChatPanel isOpen={true} onToggle={() => setChatOpen(false)} />
-      )}
     </div>
   )
 }

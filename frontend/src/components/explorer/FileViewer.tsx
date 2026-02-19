@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { Loader2, FileSearch, AlertTriangle, Search, Save, Sparkles } from 'lucide-react'
+import { Loader2, FileSearch, AlertTriangle, Search, Save } from 'lucide-react'
 import Editor from '@monaco-editor/react'
 import { useParams } from 'react-router-dom'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -8,7 +8,7 @@ import { getMonacoLanguage } from '@/utils/fileIcons'
 import { registerAssemblyLanguage } from '@/utils/monacoAssembly'
 import { registerShellLanguage } from '@/utils/monacoShell'
 import { formatFileSize } from '@/utils/format'
-import { listFunctions, listImports, disassembleFunction, decompileFunction, cleanupCode } from '@/api/analysis'
+import { listFunctions, listImports, disassembleFunction, decompileFunction } from '@/api/analysis'
 import type { FunctionInfo, ImportInfo } from '@/types'
 import HexViewer from './HexViewer'
 import BinaryInfo from './BinaryInfo'
@@ -225,10 +225,6 @@ function BinaryTabs({
   const [decompilation, setDecompilation] = useState<string | null>(null)
   const [decompilationLoading, setDecompilationLoading] = useState(false)
   const [decompilationFunction, setDecompilationFunction] = useState<string | null>(null)
-  const [cleanedCode, setCleanedCode] = useState<string | null>(null)
-  const [cleanupLoading, setCleanupLoading] = useState(false)
-  const [cleanupError, setCleanupError] = useState<string | null>(null)
-  const [cleanupFunction, setCleanupFunction] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState('content')
 
   // Reset state when file changes
@@ -240,9 +236,6 @@ function BinaryTabs({
     setDisasm(null)
     setDecompilation(null)
     setDecompilationFunction(null)
-    setCleanedCode(null)
-    setCleanupError(null)
-    setCleanupFunction(null)
     setActiveTab('content')
   }, [filePath])
 
@@ -275,23 +268,6 @@ function BinaryTabs({
       }
     },
     [projectId, filePath, functionsLoaded, functionsLoading, isElf, selectedFunction, decompilationFunction],
-  )
-
-  // Request AI cleanup for the current decompilation
-  const handleCleanup = useCallback(
-    (funcName: string) => {
-      if (cleanupLoading) return
-      setCleanupLoading(true)
-      setCleanupError(null)
-      cleanupCode(projectId, filePath, funcName)
-        .then((resp) => {
-          setCleanedCode(resp.cleaned_code)
-          setCleanupFunction(funcName)
-        })
-        .catch(() => setCleanupError('AI cleanup failed. Please try again.'))
-        .finally(() => setCleanupLoading(false))
-    },
-    [projectId, filePath, cleanupLoading],
   )
 
   // Load disassembly when a function is selected
@@ -358,10 +334,6 @@ function BinaryTabs({
             functionName={selectedFunction}
             decompilation={decompilation}
             loading={decompilationLoading}
-            cleanedCode={cleanupFunction === selectedFunction ? cleanedCode : null}
-            cleanupLoading={cleanupLoading}
-            cleanupError={cleanupError}
-            onCleanup={() => handleCleanup(selectedFunction)}
           />
         </TabsContent>
       )}
@@ -551,37 +523,17 @@ function DisassemblyPanel({
   )
 }
 
-/* ── Decompilation (pseudo-C) display in Monaco with AI cleanup ── */
+/* ── Decompilation (pseudo-C) display in Monaco ── */
 
 function DecompilationPanel({
   functionName,
   decompilation,
   loading,
-  cleanedCode,
-  cleanupLoading,
-  cleanupError,
-  onCleanup,
 }: {
   functionName: string
   decompilation: string | null
   loading: boolean
-  cleanedCode: string | null
-  cleanupLoading: boolean
-  cleanupError: string | null
-  onCleanup: () => void
 }) {
-  const [viewMode, setViewMode] = useState<'raw' | 'cleaned'>('raw')
-
-  // Switch to cleaned view when cleanup completes
-  useEffect(() => {
-    if (cleanedCode) setViewMode('cleaned')
-  }, [cleanedCode])
-
-  // Reset to raw when function changes
-  useEffect(() => {
-    setViewMode('raw')
-  }, [functionName])
-
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center">
@@ -601,81 +553,18 @@ function DecompilationPanel({
     )
   }
 
-  const showingCleaned = viewMode === 'cleaned' && cleanedCode
-  const displayCode = showingCleaned ? cleanedCode : decompilation
-
   return (
     <div className="flex h-full flex-col">
-      {/* Header with view toggle and cleanup button */}
       <div className="flex items-center gap-3 border-b border-border px-4 py-1.5">
         <span className="text-xs text-muted-foreground">
           Decompilation of <span className="font-mono text-foreground">{functionName}</span>
         </span>
-
-        {showingCleaned && (
-          <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-medium text-violet-400">
-            AI Cleaned
-          </span>
-        )}
-
-        <div className="ml-auto flex items-center gap-2">
-          {/* Raw / Cleaned toggle — only show when cleaned code is available */}
-          {cleanedCode && (
-            <div className="flex rounded-md border border-border text-[11px]">
-              <button
-                onClick={() => setViewMode('raw')}
-                className={`px-2 py-0.5 transition-colors ${
-                  viewMode === 'raw'
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Raw
-              </button>
-              <button
-                onClick={() => setViewMode('cleaned')}
-                className={`px-2 py-0.5 transition-colors ${
-                  viewMode === 'cleaned'
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Cleaned
-              </button>
-            </div>
-          )}
-
-          {/* Clean Up with AI button */}
-          {!cleanedCode && (
-            <button
-              onClick={onCleanup}
-              disabled={cleanupLoading}
-              className="flex items-center gap-1.5 rounded-md border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-[11px] font-medium text-violet-400 transition-colors hover:bg-violet-500/20 disabled:opacity-50"
-            >
-              {cleanupLoading ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Sparkles className="h-3 w-3" />
-              )}
-              {cleanupLoading ? 'Cleaning up…' : 'Clean Up with AI'}
-            </button>
-          )}
-        </div>
       </div>
 
-      {/* Error banner */}
-      {cleanupError && (
-        <div className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-          {cleanupError}
-        </div>
-      )}
-
-      {/* Code editor */}
       <div className="flex-1">
         <Editor
           language="c"
-          value={displayCode}
+          value={decompilation}
           theme="vs-dark"
           options={{
             readOnly: true,

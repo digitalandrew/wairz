@@ -2,10 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { FolderTree, PanelLeftClose, PanelLeftOpen, TerminalSquare } from 'lucide-react'
 import { useExplorerStore } from '@/stores/explorerStore'
-import { useChatStore } from '@/stores/chatStore'
 import FileTree from '@/components/explorer/FileTree'
 import FileViewer from '@/components/explorer/FileViewer'
-import ChatPanel from '@/components/chat/ChatPanel'
 import TerminalPanel from '@/components/explorer/TerminalPanel'
 
 export default function ExplorePage() {
@@ -14,8 +12,6 @@ export default function ExplorePage() {
   const resetExplorer = useExplorerStore((s) => s.reset)
   const loadDocuments = useExplorerStore((s) => s.loadDocuments)
   const navigateToPath = useExplorerStore((s) => s.navigateToPath)
-  const resetChat = useChatStore((s) => s.reset)
-  const [chatOpen, setChatOpen] = useState(false)
   const [treeOpen, setTreeOpen] = useState(true)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [terminalHeight, setTerminalHeight] = useState(250)
@@ -28,31 +24,19 @@ export default function ExplorePage() {
     }
     return () => {
       resetExplorer()
-      resetChat()
     }
-  }, [projectId, loadDocuments, resetExplorer, resetChat])
+  }, [projectId, loadDocuments, resetExplorer])
 
   // Handle ?path= query parameter: expand tree and select file
-  // Handle ?chat=1 query parameter: auto-open chat panel (used by cross-page AI help)
   useEffect(() => {
     const pathParam = searchParams.get('path')
-    const chatParam = searchParams.get('chat')
     if (!projectId) return
     if (pathParam) {
       navigateToPath(projectId, pathParam)
-    }
-    if (chatParam) {
-      setChatOpen(true)
-    }
-    if (pathParam || chatParam) {
       // Clear query params so they don't re-trigger on re-renders
       setSearchParams({}, { replace: true })
     }
   }, [projectId, searchParams, setSearchParams, navigateToPath])
-
-  const handleRequestChat = useCallback(() => {
-    setChatOpen(true)
-  }, [])
 
   // Vertical resize drag handler for terminal panel
   const handleDragStart = useCallback((e: React.MouseEvent) => {
@@ -99,7 +83,7 @@ export default function ExplorePage() {
               <PanelLeftClose className="h-4 w-4" />
             </button>
           </div>
-          <FileTree onRequestChat={handleRequestChat} />
+          <FileTree />
         </div>
       )}
 
@@ -148,17 +132,7 @@ export default function ExplorePage() {
             Terminal
           </button>
         )}
-
-        {/* Chat toggle — bottom-right */}
-        {!chatOpen && (
-          <ChatPanel isOpen={false} onToggle={() => setChatOpen(true)} />
-        )}
       </div>
-
-      {/* Right panel: chat */}
-      {chatOpen && (
-        <ChatPanel isOpen={true} onToggle={() => setChatOpen(false)} />
-      )}
     </div>
   )
 }

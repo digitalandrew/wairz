@@ -29,8 +29,6 @@ import {
   buildEmulationTerminalURL,
 } from '@/api/emulation'
 import { getFirmware } from '@/api/firmware'
-import { useChatStore } from '@/stores/chatStore'
-import ChatPanel from '@/components/chat/ChatPanel'
 import KernelManager from '@/components/emulation/KernelManager'
 import type {
   EmulationSession,
@@ -51,9 +49,6 @@ const STATUS_CONFIG: Record<EmulationStatus, { label: string; className: string 
 export default function EmulationPage() {
   const { projectId } = useParams<{ projectId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
-
-  const resetChat = useChatStore((s) => s.reset)
-  const [chatOpen, setChatOpen] = useState(false)
 
   const [sessions, setSessions] = useState<EmulationSession[]>([])
   const [loading, setLoading] = useState(true)
@@ -106,8 +101,7 @@ export default function EmulationPage() {
 
   useEffect(() => {
     loadSessions()
-    return () => { resetChat() }
-  }, [loadSessions, resetChat])
+  }, [loadSessions])
 
   // Fetch firmware architecture for kernel selection
   useEffect(() => {
@@ -216,10 +210,6 @@ export default function EmulationPage() {
     setPortForwards(updated)
   }
 
-  const handleRequestChat = useCallback(() => {
-    setChatOpen(true)
-  }, [])
-
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -323,7 +313,6 @@ export default function EmulationPage() {
                 firmwareKernelPath={firmwareKernelPath}
                 onKernelSelect={setKernelName}
                 selectedKernel={kernelName}
-                onRequestChat={handleRequestChat}
               />
               <div>
                 <div className="mb-2 flex items-center justify-between">
@@ -433,16 +422,7 @@ export default function EmulationPage() {
             </div>
           )}
 
-          {/* Chat toggle — bottom-right */}
-          {!chatOpen && (
-            <ChatPanel isOpen={false} onToggle={() => setChatOpen(true)} />
-          )}
         </div>
-
-        {/* Right panel — AI chat */}
-        {chatOpen && (
-          <ChatPanel isOpen={true} onToggle={() => setChatOpen(false)} />
-        )}
       </div>
     </div>
   )

@@ -8,12 +8,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(PROJECT_ROOT / ".env"), env_file_encoding="utf-8"
+        env_file=str(PROJECT_ROOT / ".env"), env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     database_url: str = "postgresql+asyncpg://wairz:wairz@localhost:5432/wairz"
     redis_url: str = "redis://localhost:6379/0"
-    anthropic_api_key: str = ""
     storage_root: str = "/data/firmware"
     max_upload_size_mb: int = 500
     max_tool_output_kb: int = 30
@@ -29,8 +29,6 @@ class Settings(BaseSettings):
     emulation_image: str = "wairz-emulation"
     emulation_kernel_dir: str = "/opt/kernels"
     emulation_network: str = "wairz_emulation_net"
-    ai_max_retries: int = 3
-    ai_max_context_tokens: int = 100000
     log_level: str = "INFO"
 
 

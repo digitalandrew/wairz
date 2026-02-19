@@ -14,8 +14,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
 import { useNavigate, useParams } from 'react-router-dom'
-import { MessageSquare, ExternalLink } from 'lucide-react'
-import { useChatStore } from '@/stores/chatStore'
+import { ExternalLink } from 'lucide-react'
 import type {
   ComponentGraph,
   ComponentNode as CNode,
@@ -188,13 +187,11 @@ interface ContextMenuState {
 
 interface ComponentMapInnerProps {
   graph: ComponentGraph
-  onRequestChat?: () => void
 }
 
-function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
+function ComponentMapInner({ graph }: ComponentMapInnerProps) {
   const navigate = useNavigate()
   const { projectId } = useParams<{ projectId: string }>()
-  const addAttachment = useChatStore((s) => s.addAttachment)
   const [visibleTypes, setVisibleTypes] = useState<Set<ComponentNodeType>>(new Set(ALL_TYPES))
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedEdge, setSelectedEdge] = useState<SelectedEdge | null>(null)
@@ -386,38 +383,11 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
   )
 
   // Context menu actions
-  const handleAskAIAboutNode = useCallback(() => {
-    if (!contextMenu || contextMenu.kind !== 'node' || !contextMenu.nodeId) return
-    addAttachment({ path: contextMenu.nodeId, name: contextMenu.nodeLabel ?? contextMenu.nodeId })
-    setContextMenu(null)
-    onRequestChat?.()
-  }, [contextMenu, addAttachment, onRequestChat])
-
   const handleOpenInExplorer = useCallback(() => {
     if (!contextMenu || contextMenu.kind !== 'node' || !contextMenu.nodeId || !projectId) return
     navigate(`/projects/${projectId}/explore?path=${encodeURIComponent(contextMenu.nodeId)}`)
     setContextMenu(null)
   }, [contextMenu, projectId, navigate])
-
-  const handleAskAIAboutEdge = useCallback(() => {
-    if (!contextMenu || contextMenu.kind !== 'edge') return
-    const { edgeSource, edgeTarget, edgeType } = contextMenu
-    const label = edgeTypeLabels[edgeType!] ?? edgeType
-    if (edgeSource) {
-      addAttachment({ path: edgeSource, name: edgeSource.split('/').pop() ?? edgeSource })
-    }
-    setContextMenu(null)
-    onRequestChat?.()
-    setTimeout(() => {
-      const chatInput = document.querySelector<HTMLTextAreaElement>('[data-chat-input]')
-      if (chatInput) {
-        const prompt = `What is the relationship between ${edgeSource} and ${edgeTarget}? (${label})`
-        chatInput.value = prompt
-        chatInput.dispatchEvent(new Event('input', { bubbles: true }))
-        chatInput.focus()
-      }
-    }, 100)
-  }, [contextMenu, addAttachment, onRequestChat])
 
   const handleToggleType = useCallback((type: ComponentNodeType) => {
     setVisibleTypes((prev) => {
@@ -524,13 +494,6 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
               </div>
               <div className="mx-1 my-0.5 border-t border-border" />
               <button
-                onClick={handleAskAIAboutNode}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent hover:text-accent-foreground"
-              >
-                <MessageSquare className="h-3.5 w-3.5" />
-                Ask AI about this component
-              </button>
-              <button
                 onClick={handleOpenInExplorer}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent hover:text-accent-foreground"
               >
@@ -540,19 +503,9 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
             </>
           )}
           {contextMenu.kind === 'edge' && (
-            <>
-              <div className="truncate px-3 py-1 text-xs text-muted-foreground">
-                {contextMenu.edgeSource} {edgeTypeLabels[contextMenu.edgeType!] ?? ''} {contextMenu.edgeTarget}
-              </div>
-              <div className="mx-1 my-0.5 border-t border-border" />
-              <button
-                onClick={handleAskAIAboutEdge}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent hover:text-accent-foreground"
-              >
-                <MessageSquare className="h-3.5 w-3.5" />
-                Ask AI about this relationship
-              </button>
-            </>
+            <div className="truncate px-3 py-1 text-xs text-muted-foreground">
+              {contextMenu.edgeSource} {edgeTypeLabels[contextMenu.edgeType!] ?? ''} {contextMenu.edgeTarget}
+            </div>
           )}
         </div>
       )}
@@ -560,10 +513,10 @@ function ComponentMapInner({ graph, onRequestChat }: ComponentMapInnerProps) {
   )
 }
 
-export default function ComponentMap({ graph, onRequestChat }: { graph: ComponentGraph; onRequestChat?: () => void }) {
+export default function ComponentMap({ graph }: { graph: ComponentGraph }) {
   return (
     <ReactFlowProvider>
-      <ComponentMapInner graph={graph} onRequestChat={onRequestChat} />
+      <ComponentMapInner graph={graph} />
     </ReactFlowProvider>
   )
 }

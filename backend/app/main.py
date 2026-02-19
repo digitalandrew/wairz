@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
 from app.config import get_settings
-from app.routers import analysis, chat, component_map, documents, emulation, files, findings, firmware, kernels, projects, reviews, sbom, terminal
+from app.routers import analysis, component_map, documents, emulation, files, findings, firmware, kernels, projects, sbom, terminal
 from app.utils.sandbox import PathTraversalError
 
 
@@ -37,12 +37,10 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(firmware.router)
 app.include_router(files.router)
-app.include_router(chat.router)
 app.include_router(analysis.router)
 app.include_router(component_map.router)
 app.include_router(findings.router)
 app.include_router(documents.router)
-app.include_router(reviews.router)
 app.include_router(sbom.router)
 app.include_router(terminal.router)
 app.include_router(emulation.router)

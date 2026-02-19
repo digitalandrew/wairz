@@ -21,7 +21,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatFileSize, formatDate } from '@/utils/format'
 import FirmwareUpload from '@/components/projects/FirmwareUpload'
 import DocumentsCard from '@/components/projects/DocumentsCard'
-import AutonomousReviewCard from '@/components/projects/AutonomousReviewCard'
 import McpConnectionCard from '@/components/projects/McpConnectionCard'
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
@@ -205,8 +204,6 @@ export default function ProjectDetailPage() {
               </Link>
             </Button>
           </div>
-
-          <AutonomousReviewCard projectId={project.id} />
 
           <McpConnectionCard projectId={project.id} />
         </>
