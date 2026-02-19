@@ -3,9 +3,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
 from app.config import get_settings
 from app.routers import analysis, chat, component_map, documents, emulation, files, findings, firmware, kernels, projects, reviews, sbom, terminal
+from app.utils.sandbox import PathTraversalError
 
 
 @asynccontextmanager
@@ -44,6 +47,11 @@ app.include_router(sbom.router)
 app.include_router(terminal.router)
 app.include_router(emulation.router)
 app.include_router(kernels.router)
+
+
+@app.exception_handler(PathTraversalError)
+async def path_traversal_handler(request: Request, exc: PathTraversalError):
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 
 @app.get("/health")

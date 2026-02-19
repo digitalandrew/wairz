@@ -1,7 +1,9 @@
 import os
 from collections.abc import Iterator
 
-from fastapi import HTTPException
+
+class PathTraversalError(ValueError):
+    """Raised when a path escapes the allowed root directory."""
 
 
 def validate_path(extracted_root: str, requested_path: str) -> str:
@@ -10,6 +12,9 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
     Uses os.path.realpath() to resolve symlinks and canonicalize,
     then checks the result starts with the real root + os.sep (or is the root itself)
     to prevent path traversal and prefix collision attacks.
+
+    Raises:
+        PathTraversalError: If the resolved path escapes extracted_root.
     """
     real_root = os.path.realpath(extracted_root)
     # Join and resolve the full path
@@ -17,7 +22,7 @@ def validate_path(extracted_root: str, requested_path: str) -> str:
 
     # Must be the root itself or under root + separator
     if full_path != real_root and not full_path.startswith(real_root + os.sep):
-        raise HTTPException(403, "Path traversal detected")
+        raise PathTraversalError("Path traversal detected")
 
     return full_path
 
