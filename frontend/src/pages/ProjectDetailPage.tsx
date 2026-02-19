@@ -22,6 +22,7 @@ import { formatFileSize, formatDate } from '@/utils/format'
 import FirmwareUpload from '@/components/projects/FirmwareUpload'
 import DocumentsCard from '@/components/projects/DocumentsCard'
 import AutonomousReviewCard from '@/components/projects/AutonomousReviewCard'
+import McpConnectionCard from '@/components/projects/McpConnectionCard'
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   ready: 'default',
@@ -206,6 +207,8 @@ export default function ProjectDetailPage() {
           </div>
 
           <AutonomousReviewCard projectId={project.id} />
+
+          <McpConnectionCard projectId={project.id} />
         </>
       )}
 

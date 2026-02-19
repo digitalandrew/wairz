@@ -15,14 +15,17 @@ dependencies = [
     "pyelftools>=0.31",
     "aiofiles>=24.0.0",
     "anthropic>=0.79.0",
-    "r2pipe>=0.19.0",
     "weasyprint>=62.0",
     "pypdf>=4.0",
     "packageurl-python>=0.15.0",
     "nvdlib>=0.7.6",
     "docker>=7.0.0",
     "httpx>=0.27.0",
+    "mcp[cli]>=1.2.0",
 ]
+
+[project.scripts]
+wairz-mcp = "app.mcp_server:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
