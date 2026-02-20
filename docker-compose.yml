@@ -31,6 +31,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      additional_contexts:
+        kernels: ./emulation/kernels
       args:
         DOCKER_GID: "${DOCKER_GID:-999}"
     ports:

@@ -84,9 +84,14 @@ RUN uv sync --no-dev --no-editable 2>/dev/null || uv sync --no-editable
 # Copy application code
 COPY . .
 
+# Bake in default emulation kernels so they're available out of the box.
+# The docker-compose bind mount (./emulation/kernels:/opt/kernels) overlays
+# on top at runtime, allowing users to add custom kernels.
+COPY --from=kernels . /opt/kernels/
+
 # Create data and Ghidra project directories
 RUN mkdir -p /data/firmware /tmp/ghidra_projects \
-    && chown -R wairz:wairz /data /app /tmp/ghidra_projects /opt/ghidra
+    && chown -R wairz:wairz /data /app /tmp/ghidra_projects /opt/ghidra /opt/kernels
 
 USER wairz
 
