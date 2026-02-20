@@ -1,0 +1,7 @@
+{
+  "architecture": "mipsel",
+  "description": "Debian Bookworm 6.1.0-42-4kc-malta kernel with FPU support + custom initramfs (loads ata_piix, ext4 modules)",
+  "uploaded_at": "2026-02-20T09:35:00.000000+00:00",
+  "source_url": "https://deb.debian.org/debian/pool/main/l/linux/linux-image-6.1.0-42-4kc-malta_6.1.123-1_mipsel.deb",
+  "initrd": "debian-mipsel-kernel.initrd"
+}

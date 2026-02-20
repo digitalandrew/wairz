@@ -186,10 +186,12 @@ class KernelService:
 
         kernels = []
         for entry in os.scandir(self._kernel_dir):
-            # Skip sidecar JSON files, hidden files, and directories
+            # Skip sidecar JSON files, initrd companions, hidden files, directories
             if entry.name.startswith("."):
                 continue
             if entry.name.endswith(".json"):
+                continue
+            if entry.name.endswith(".initrd"):
                 continue
             if not entry.is_file():
                 continue

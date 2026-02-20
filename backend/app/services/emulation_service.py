@@ -297,6 +297,7 @@ class EmulationService:
         arguments: str | None = None,
         port_forwards: list[dict] | None = None,
         kernel_name: str | None = None,
+        init_path: str | None = None,
     ) -> EmulationSession:
         """Start a new emulation session.
 
@@ -306,6 +307,8 @@ class EmulationService:
             binary_path: For user mode — path to the binary within the extracted FS.
             arguments: Optional CLI arguments for user mode.
             port_forwards: List of {"host": int, "guest": int} dicts.
+            kernel_name: Specific kernel to use for system mode.
+            init_path: Override init binary for system mode (e.g., "/bin/sh").
         """
         if mode not in ("user", "system"):
             raise ValueError("mode must be 'user' or 'system'")
@@ -356,6 +359,7 @@ class EmulationService:
                 extracted_path=firmware.extracted_path,
                 kernel_name=kernel_name,
                 firmware_kernel_path=firmware.kernel_path,
+                init_path=init_path,
             )
             session.container_id = container_id
             session.status = "running"
@@ -657,6 +661,7 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
         extracted_path: str,
         kernel_name: str | None = None,
         firmware_kernel_path: str | None = None,
+        init_path: str | None = None,
     ) -> str:
         """Spawn a Docker container for this emulation session."""
         client = self._get_docker_client()
@@ -818,6 +823,7 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
                 CONTAINER_KERNEL_PATH,
                 pf_str,
                 initrd_arg,
+                init_path or "",
             ]
             container.exec_run(cmd, detach=True)
 

@@ -76,15 +76,33 @@ def find_filesystem_root(extraction_dir: str) -> str | None:
 
 
 def detect_architecture(fs_root: str) -> tuple[str | None, str | None]:
-    """Detect architecture and endianness by examining ELF binaries."""
+    """Detect architecture and endianness by examining ELF binaries.
+
+    Uses majority voting across all ELF binaries found in common directories
+    to handle mixed-architecture filesystems (e.g., ARM firmware with x86-64
+    systemd from a host layer).
+    """
+    from collections import Counter
+
     # Look for ELF binaries in common dirs
     search_dirs = ["bin", "usr/bin", "sbin", "usr/sbin", "lib"]
+    votes: Counter[tuple[str, str]] = Counter()
+    max_scan = 50  # Cap scanning to avoid slowness on huge filesystems
+
     for search_dir in search_dirs:
         search_path = os.path.join(fs_root, search_dir)
         if not os.path.isdir(search_path):
             continue
 
-        for entry in os.listdir(search_path):
+        try:
+            entries = os.listdir(search_path)
+        except OSError:
+            continue
+
+        for entry in entries:
+            if sum(votes.values()) >= max_scan:
+                break
+
             full_path = os.path.join(search_path, entry)
             if not os.path.isfile(full_path):
                 continue
@@ -102,11 +120,16 @@ def detect_architecture(fs_root: str) -> tuple[str | None, str | None]:
                     if arch == "mips" and endianness == "little":
                         arch = "mipsel"
 
-                    return arch, endianness
+                    votes[(arch, endianness)] += 1
             except Exception:
                 continue
 
-    return None, None
+    if not votes:
+        return None, None
+
+    # Return the most common architecture
+    (arch, endianness), _count = votes.most_common(1)[0]
+    return arch, endianness
 
 
 def detect_os_info(fs_root: str) -> str | None:

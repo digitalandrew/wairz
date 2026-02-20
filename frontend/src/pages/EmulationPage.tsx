@@ -65,6 +65,7 @@ export default function EmulationPage() {
   const [kernelName, setKernelName] = useState<string | null>(null)
   const [firmwareArch, setFirmwareArch] = useState<string | null>(null)
   const [firmwareKernelPath, setFirmwareKernelPath] = useState<string | null>(null)
+  const [initPath, setInitPath] = useState('')
 
   // Active session + terminal
   const [activeSession, setActiveSession] = useState<EmulationSession | null>(null)
@@ -141,6 +142,7 @@ export default function EmulationPage() {
         arguments: mode === 'user' && arguments_.trim() ? arguments_.trim() : undefined,
         port_forwards: mode === 'system' && portForwards.length > 0 ? portForwards : undefined,
         kernel_name: mode === 'system' && kernelName ? kernelName : undefined,
+        init_path: mode === 'system' && initPath.trim() ? initPath.trim() : undefined,
       })
       setActiveSession(session)
       if (session.status === 'running' || session.status === 'error') {
@@ -314,6 +316,21 @@ export default function EmulationPage() {
                 onKernelSelect={setKernelName}
                 selectedKernel={kernelName}
               />
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Init Override
+                </label>
+                <input
+                  type="text"
+                  value={initPath}
+                  onChange={(e) => setInitPath(e.target.value)}
+                  placeholder="/bin/sh (leave empty for default /sbin/init)"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                />
+                <p className="mt-0.5 text-xs text-muted-foreground/60">
+                  Override if /sbin/init is broken or wrong architecture
+                </p>
+              </div>
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <label className="text-xs font-medium text-muted-foreground">

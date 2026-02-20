@@ -11,6 +11,7 @@ ROOTFS="$2"
 KERNEL="$3"
 PORT_FORWARDS="$4"  # comma-separated host:guest pairs, e.g., "8080:80,2222:22"
 INITRD="$5"         # optional path to initramfs/initrd image
+INIT_PATH="$6"      # optional init binary override (e.g., /bin/sh)
 
 LOG="/tmp/qemu-system.log"
 SERIAL_SOCK="/tmp/qemu-serial.sock"
@@ -153,7 +154,7 @@ case "$ARCH" in
         CONSOLE="ttyS0"
         DRIVE_IF=""
         ROOT_DEV="/dev/sda"
-        CPU_ARGS=""
+        CPU_ARGS="-cpu 34Kf"  # MIPS32r2 + DSP + FPU (4Kc default only supports r1)
         GUEST_RAM="256"  # malta max is 256MB
         ;;
     mipsel|mipsle)
@@ -162,7 +163,7 @@ case "$ARCH" in
         CONSOLE="ttyS0"
         DRIVE_IF=""
         ROOT_DEV="/dev/sda"
-        CPU_ARGS=""
+        CPU_ARGS="-cpu 34Kf"  # MIPS32r2 + DSP + FPU (4Kc default only supports r1)
         GUEST_RAM="256"  # malta max is 256MB
         ;;
     x86|i386|i686)
@@ -198,8 +199,6 @@ fi
 echo "Starting: $QEMU_BIN -M $MACHINE $CPU_ARGS"
 echo "Serial console: $SERIAL_SOCK"
 echo "Drive interface: ${DRIVE_IF:-default}"
-echo "Kernel append: root=$ROOT_DEV rw console=$CONSOLE"
-
 # Build optional initrd argument
 INITRD_ARGS=""
 if [ -n "$INITRD" ] && [ -f "$INITRD" ]; then
@@ -208,6 +207,14 @@ if [ -n "$INITRD" ] && [ -f "$INITRD" ]; then
 else
     echo "Initrd: none"
 fi
+
+# Build kernel append string
+APPEND_ARGS="root=$ROOT_DEV rw console=$CONSOLE panic=0"
+if [ -n "$INIT_PATH" ]; then
+    APPEND_ARGS="$APPEND_ARGS init=$INIT_PATH"
+    echo "Init override: $INIT_PATH"
+fi
+echo "Kernel append: $APPEND_ARGS"
 
 # Launch QEMU
 # -nodefaults: suppress audio/USB/etc warnings
@@ -224,5 +231,5 @@ exec "$QEMU_BIN" \
     -kernel "$KERNEL" \
     $INITRD_ARGS \
     -drive "file=$ROOTFS_IMG,format=raw${DRIVE_IF}" \
-    -append "root=$ROOT_DEV rw console=$CONSOLE panic=0" \
+    -append "$APPEND_ARGS" \
     $NET_ARGS

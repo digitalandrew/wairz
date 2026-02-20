@@ -282,6 +282,7 @@ export interface EmulationStartRequest {
   arguments?: string
   port_forwards?: PortForward[]
   kernel_name?: string
+  init_path?: string
 }
 
 // ── Kernel types ──

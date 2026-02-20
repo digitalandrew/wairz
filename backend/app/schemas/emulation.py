@@ -16,6 +16,7 @@ class EmulationStartRequest(BaseModel):
     arguments: str | None = None
     port_forwards: list[PortForward] = []
     kernel_name: str | None = None
+    init_path: str | None = None  # Override /sbin/init (e.g., "/bin/sh" or "/bin/busybox")
 
 
 class EmulationSessionResponse(BaseModel):

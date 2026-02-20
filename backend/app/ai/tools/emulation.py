@@ -134,6 +134,14 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
                         "If omitted, auto-selects a kernel matching the firmware architecture."
                     ),
                 },
+                "init_path": {
+                    "type": "string",
+                    "description": (
+                        "Override the init binary for system mode (added as init= kernel parameter). "
+                        "Use this when /sbin/init is broken, missing, or wrong architecture. "
+                        "Common values: '/bin/sh', '/bin/busybox sh', '/linuxrc'"
+                    ),
+                },
             },
             "required": ["mode"],
         },
@@ -302,6 +310,7 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
     arguments = input.get("arguments")
     port_forwards = input.get("port_forwards", [])
     kernel_name = input.get("kernel_name")
+    init_path = input.get("init_path")
 
     if mode == "user" and not binary_path:
         return "Error: binary_path is required for user-mode emulation."
@@ -323,6 +332,7 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
             arguments=arguments,
             port_forwards=port_forwards,
             kernel_name=kernel_name,
+            init_path=init_path,
         )
         await context.db.commit()
     except ValueError as exc:
