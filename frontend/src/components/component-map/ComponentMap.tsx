@@ -49,7 +49,7 @@ const edgeTypeLabels: Record<ComponentEdgeType, string> = {
   configures: 'configures',
 }
 
-const ALL_TYPES = new Set<ComponentNodeType>(['binary', 'library', 'script', 'config', 'init_script'])
+const ALL_TYPES = new Set<ComponentNodeType>(['binary', 'library', 'script', 'config', 'init_script', 'kernel_module'])
 
 const CLUSTER_THRESHOLD = 200
 const MIN_CLUSTER_SIZE = 3
@@ -414,6 +414,7 @@ function ComponentMapInner({ graph }: ComponentMapInnerProps) {
       case 'script': return '#22c55e'
       case 'config': return '#f97316'
       case 'init_script': return '#eab308'
+      case 'kernel_module': return '#ef4444'
       default: return '#6b7280'
     }
   }, [])

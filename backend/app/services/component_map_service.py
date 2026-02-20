@@ -183,9 +183,14 @@ class ComponentMapService:
         return None
 
     def _classify_elf(self, abs_path: str, rel_path: str) -> str:
-        """Classify an ELF as binary or library."""
-        # .so in filename → library
+        """Classify an ELF as binary, library, or kernel_module."""
         basename = os.path.basename(rel_path)
+
+        # .ko extension → kernel module
+        if basename.endswith(".ko") or ".ko." in basename:
+            return "kernel_module"
+
+        # .so in filename → library
         if ".so" in basename:
             return "library"
 
@@ -604,6 +609,7 @@ class ComponentMapService:
             "binary": 5,
             "library": 4,
             "init_script": 3,
+            "kernel_module": 2,
             "script": 2,
             "config": 1,
         }

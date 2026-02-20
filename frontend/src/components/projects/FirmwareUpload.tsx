@@ -119,7 +119,7 @@ export default function FirmwareUpload({ projectId, onComplete }: FirmwareUpload
       <div className="text-center">
         <p className="text-sm font-medium">Drop firmware file here or click to browse</p>
         <p className="text-xs text-muted-foreground mt-1">
-          Supports SquashFS, JFFS2, UBIFS, CramFS, ext, CPIO images
+          Supports .bin, .img, .hex, .chk, .trx, and other firmware formats
         </p>
       </div>
       <input ref={inputRef} type="file" className="hidden" onChange={onInputChange} />

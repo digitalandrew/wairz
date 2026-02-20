@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { NavLink, useParams, useNavigate } from 'react-router-dom'
+import { NavLink, Link, useParams, useNavigate } from 'react-router-dom'
 import {
   PanelLeftClose,
   FolderOpen,
@@ -104,7 +104,9 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   return (
     <aside className="flex h-full w-64 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
       <div className="flex h-14 items-center gap-2 px-4">
-        <img src={wairzLogo} alt="Wairz" className="w-40 invert" />
+        <Link to="/projects" title="Back to Projects">
+          <img src={wairzLogo} alt="Wairz" className="w-40 invert" />
+        </Link>
         <button
           onClick={onToggle}
           className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"

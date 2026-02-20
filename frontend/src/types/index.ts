@@ -308,7 +308,7 @@ export interface EmulationExecResponse {
 
 // ── Component Map types ──
 
-export type ComponentNodeType = 'binary' | 'library' | 'script' | 'config' | 'init_script'
+export type ComponentNodeType = 'binary' | 'library' | 'script' | 'config' | 'init_script' | 'kernel_module'
 
 export type ComponentEdgeType =
   | 'links_library'

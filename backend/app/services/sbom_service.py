@@ -18,28 +18,68 @@ MAX_BINARY_READ = 64 * 1024  # 64KB for strings extraction
 
 # Well-known vendor:product mappings for CPE construction
 CPE_VENDOR_MAP: dict[str, tuple[str, str]] = {
+    # Core system
     "busybox": ("busybox", "busybox"),
+    "glibc": ("gnu", "glibc"),
+    "libc": ("gnu", "glibc"),
+    "uclibc": ("uclibc", "uclibc"),
+    "musl": ("musl-libc", "musl"),
+    "bash": ("gnu", "bash"),
+    # SSL/TLS & crypto
     "openssl": ("openssl", "openssl"),
     "libssl": ("openssl", "openssl"),
     "libcrypto": ("openssl", "openssl"),
-    "dropbear": ("matt_johnston", "dropbear"),
-    "dnsmasq": ("thekelleys", "dnsmasq"),
-    "lighttpd": ("lighttpd", "lighttpd"),
-    "curl": ("haxx", "curl"),
-    "libcurl": ("haxx", "curl"),
-    "wget": ("gnu", "wget"),
-    "openssh": ("openbsd", "openssh"),
-    "iptables": ("netfilter", "iptables"),
-    "hostapd": ("w1.fi", "hostapd"),
-    "wpa_supplicant": ("w1.fi", "wpa_supplicant"),
-    "samba": ("samba", "samba"),
+    "wolfssl": ("wolfssl", "wolfssl"),
+    "libwolfssl": ("wolfssl", "wolfssl"),
+    "mbedtls": ("arm", "mbed_tls"),
+    "libmbedtls": ("arm", "mbed_tls"),
+    "libmbedcrypto": ("arm", "mbed_tls"),
+    "gnutls": ("gnu", "gnutls"),
+    "libgnutls": ("gnu", "gnutls"),
+    "libsodium": ("libsodium_project", "libsodium"),
+    "libgcrypt": ("gnupg", "libgcrypt"),
+    "libnettle": ("gnu", "nettle"),
+    # Web servers
     "nginx": ("f5", "nginx"),
+    "lighttpd": ("lighttpd", "lighttpd"),
     "apache": ("apache", "http_server"),
     "httpd": ("apache", "http_server"),
     "mini_httpd": ("acme", "mini_httpd"),
+    "uhttpd": ("openwrt", "uhttpd"),
+    "goahead": ("embedthis", "goahead"),
+    "boa": ("boa", "boa_web_server"),
+    "thttpd": ("acme", "thttpd"),
+    "mongoose": ("cesanta", "mongoose"),
+    # SSH
+    "dropbear": ("matt_johnston", "dropbear"),
+    "openssh": ("openbsd", "openssh"),
+    # DNS
+    "dnsmasq": ("thekelleys", "dnsmasq"),
+    "unbound": ("nlnetlabs", "unbound"),
+    # Network services
+    "curl": ("haxx", "curl"),
+    "libcurl": ("haxx", "curl"),
+    "wget": ("gnu", "wget"),
+    "hostapd": ("w1.fi", "hostapd"),
+    "wpa_supplicant": ("w1.fi", "wpa_supplicant"),
+    "openvpn": ("openvpn", "openvpn"),
+    "samba": ("samba", "samba"),
+    "mosquitto": ("eclipse", "mosquitto"),
+    "avahi": ("avahi", "avahi"),
+    # Firewall / netfilter
+    "iptables": ("netfilter", "iptables"),
+    "ip6tables": ("netfilter", "iptables"),
+    "nftables": ("netfilter", "nftables"),
+    # FTP / SNMP / UPnP
+    "proftpd": ("proftpd", "proftpd"),
+    "vsftpd": ("beasts", "vsftpd"),
+    "miniupnpd": ("miniupnp_project", "miniupnpd"),
+    "ntpd": ("ntp", "ntp"),
+    "netatalk": ("netatalk", "netatalk"),
+    # Bootloader
     "uboot": ("denx", "u-boot"),
     "u-boot": ("denx", "u-boot"),
-    "syslog-ng": ("balabit", "syslog-ng"),
+    # Utility libraries
     "zlib": ("zlib", "zlib"),
     "sqlite": ("sqlite", "sqlite"),
     "libjpeg": ("ijg", "libjpeg"),
@@ -47,18 +87,23 @@ CPE_VENDOR_MAP: dict[str, tuple[str, str]] = {
     "lua": ("lua", "lua"),
     "perl": ("perl", "perl"),
     "python": ("python", "python"),
-    "bash": ("gnu", "bash"),
-    "glibc": ("gnu", "glibc"),
-    "libc": ("gnu", "glibc"),
-    "uclibc": ("uclibc", "uclibc"),
-    "musl": ("musl-libc", "musl"),
-    "avahi": ("avahi", "avahi"),
-    "miniupnpd": ("miniupnp_project", "miniupnpd"),
-    "proftpd": ("proftpd", "proftpd"),
-    "vsftpd": ("beasts", "vsftpd"),
-    "ntpd": ("ntp", "ntp"),
-    "netatalk": ("netatalk", "netatalk"),
-    "mosquitto": ("eclipse", "mosquitto"),
+    "json-c": ("json-c_project", "json-c"),
+    "libxml2": ("xmlsoft", "libxml2"),
+    "pcre": ("pcre", "pcre"),
+    "expat": ("libexpat_project", "libexpat"),
+    "dbus": ("freedesktop", "dbus"),
+    "readline": ("gnu", "readline"),
+    "ncurses": ("gnu", "ncurses"),
+    # OpenWrt ecosystem
+    "ubus": ("openwrt", "ubus"),
+    "libubox": ("openwrt", "libubox"),
+    "uci": ("openwrt", "uci"),
+    # Logging
+    "syslog-ng": ("balabit", "syslog-ng"),
+    # IoT protocols
+    "libcoap": ("libcoap", "libcoap"),
+    # TR-069/CWMP
+    "cwmpd": ("cwmp", "cwmpd"),
 }
 
 # Regex patterns for binary version string extraction
@@ -83,12 +128,33 @@ VERSION_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("mini_httpd", re.compile(rb"mini_httpd/(\d+\.\d+(?:\.\d+)?)")),
     ("lua", re.compile(rb"Lua (\d+\.\d+\.\d+)")),
     ("sqlite", re.compile(rb"SQLite (\d+\.\d+\.\d+)")),
+    # Additional patterns
+    ("apache", re.compile(rb"Apache/(\d+\.\d+\.\d+)")),
+    ("uhttpd", re.compile(rb"uhttpd[/ ]v?(\d+\.\d+(?:\.\d+)?)")),
+    ("goahead", re.compile(rb"GoAhead[/ -](\d+\.\d+\.\d+)")),
+    ("openvpn", re.compile(rb"OpenVPN (\d+\.\d+\.\d+)")),
+    ("wolfssl", re.compile(rb"wolfSSL (\d+\.\d+\.\d+)")),
+    ("mbedtls", re.compile(rb"mbed TLS (\d+\.\d+\.\d+)")),
+    ("unbound", re.compile(rb"unbound (\d+\.\d+\.\d+)")),
+    ("mosquitto", re.compile(rb"mosquitto[/ ](\d+\.\d+\.\d+)")),
+    ("boa", re.compile(rb"Boa/(\d+\.\d+\.\d+)")),
+    ("thttpd", re.compile(rb"thttpd/(\d+\.\d+(?:\.\d+)?)")),
+    ("mongoose", re.compile(rb"Mongoose[/ ](\d+\.\d+(?:\.\d+)?)")),
 ]
 
 # Library SONAME -> component name mapping for well-known libraries
 SONAME_COMPONENT_MAP: dict[str, str] = {
+    # SSL/TLS & crypto
     "libssl": "openssl",
     "libcrypto": "openssl",
+    "libwolfssl": "wolfssl",
+    "libmbedtls": "mbedtls",
+    "libmbedcrypto": "mbedtls",
+    "libgnutls": "gnutls",
+    "libsodium": "libsodium",
+    "libgcrypt": "libgcrypt",
+    "libnettle": "nettle",
+    # Utility libraries
     "libcurl": "curl",
     "libz": "zlib",
     "libsqlite3": "sqlite",
@@ -96,11 +162,28 @@ SONAME_COMPONENT_MAP: dict[str, str] = {
     "libpng16": "libpng",
     "libjpeg": "libjpeg",
     "liblua": "lua",
+    "libjson-c": "json-c",
+    "libxml2": "libxml2",
+    "libpcre": "pcre",
+    "libexpat": "expat",
+    "libdbus": "dbus",
+    "libreadline": "readline",
+    "libncurses": "ncurses",
+    # Networking
     "libavahi-client": "avahi",
     "libavahi-common": "avahi",
+    "libnl": "libnl",
+    "libnl-3": "libnl",
+    "libmosquitto": "mosquitto",
+    # OpenWrt
     "libubus": "ubus",
-    "libubox": "ubox",
+    "libubox": "libubox",
     "libuci": "uci",
+    "libiwinfo": "iwinfo",
+    # Firewall / netfilter
+    "libiptc": "iptables",
+    "libnfnetlink": "netfilter",
+    # System libraries (C runtime)
     "libpthread": "glibc",
     "libdl": "glibc",
     "librt": "glibc",
@@ -108,6 +191,54 @@ SONAME_COMPONENT_MAP: dict[str, str] = {
     "libc": "glibc",
     "libgcc_s": "gcc",
     "libstdc++": "gcc",
+}
+
+# Firmware OS fingerprinting markers (additional to /etc/os-release)
+FIRMWARE_MARKERS: dict[str, list[str]] = {
+    "dd-wrt": ["/etc/dd-wrt_version"],
+    "buildroot": ["/etc/buildroot_version", "/etc/br-version"],
+    "yocto": ["/etc/version", "/etc/build"],
+    "android": ["/system/build.prop"],
+}
+
+# Known services/daemons with risk classification for firmware security
+# CRITICAL = should never be in production (plaintext, no auth)
+# HIGH = common attack surface requiring review
+KNOWN_SERVICE_RISKS: dict[str, str] = {
+    # CRITICAL — plaintext protocols with no authentication
+    "telnetd": "critical",
+    "utelnetd": "critical",
+    "rlogind": "critical",
+    "rshd": "critical",
+    "rexecd": "critical",
+    "tftpd": "critical",
+    # HIGH — common attack surface
+    "ftpd": "high",
+    "vsftpd": "high",
+    "proftpd": "high",
+    "httpd": "high",
+    "uhttpd": "high",
+    "lighttpd": "high",
+    "goahead": "high",
+    "miniupnpd": "high",
+    "snmpd": "high",
+    "smbd": "high",
+    "cwmpd": "high",
+    "mini_httpd": "high",
+    "boa": "high",
+    "mongoose": "high",
+    # MEDIUM — expected but should be hardened
+    "sshd": "medium",
+    "dropbear": "medium",
+    "dnsmasq": "medium",
+    "hostapd": "medium",
+    "openvpn": "medium",
+    "mosquitto": "medium",
+    # LOW — generally safe
+    "ntpd": "low",
+    "crond": "low",
+    "syslogd": "low",
+    "avahi-daemon": "low",
 }
 
 
@@ -147,9 +278,11 @@ class SbomService:
         """
         self._scan_package_managers()
         self._scan_kernel_version()
+        self._scan_firmware_markers()
         self._scan_busybox()
         self._scan_library_sonames()
         self._scan_binary_version_strings()
+        self._annotate_service_risks()
 
         results = []
         for comp in self._components.values():
@@ -410,6 +543,44 @@ class SbomService:
                 metadata={"display_name": distro_name},
             )
             self._add_component(comp)
+
+    # ------------------------------------------------------------------
+    # Strategy 2b: Firmware OS fingerprinting via marker files
+    # ------------------------------------------------------------------
+
+    def _scan_firmware_markers(self) -> None:
+        """Check for firmware distro marker files beyond os-release."""
+        for distro_id, marker_paths in FIRMWARE_MARKERS.items():
+            for rel_path in marker_paths:
+                abs_path = self._abs_path(rel_path)
+                if not os.path.isfile(abs_path):
+                    continue
+                try:
+                    with open(abs_path, "r", errors="replace") as f:
+                        content = f.read(1024).strip()
+                except OSError:
+                    continue
+                if not content:
+                    continue
+
+                # Try to extract a version number from the file content
+                version_match = re.search(r"(\d+\.\d+(?:\.\d+)?)", content)
+                version = version_match.group(1) if version_match else content[:50]
+
+                comp = IdentifiedComponent(
+                    name=distro_id,
+                    version=version,
+                    type="operating-system",
+                    cpe=self._build_cpe(distro_id, distro_id, version),
+                    purl=self._build_purl(distro_id, version),
+                    supplier=distro_id,
+                    detection_source="config_file",
+                    detection_confidence="high",
+                    file_paths=[rel_path],
+                    metadata={"marker_file": rel_path, "raw_content": content[:200]},
+                )
+                self._add_component(comp)
+                break  # Only need one marker per distro
 
     # ------------------------------------------------------------------
     # Dedicated BusyBox detection (critical for embedded Linux)
@@ -704,3 +875,57 @@ class SbomService:
         if len(current) >= min_length:
             strings.append(bytes(current))
         return strings
+
+    # ------------------------------------------------------------------
+    # Post-processing: Annotate service risk levels
+    # ------------------------------------------------------------------
+
+    def _annotate_service_risks(self) -> None:
+        """Tag identified components with service risk levels.
+
+        Checks binary names in standard daemon paths and annotates
+        components that match known services with their risk level.
+        """
+        # Check for known service binaries in the filesystem
+        daemon_dirs = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"]
+
+        for daemon_dir in daemon_dirs:
+            abs_dir = self._abs_path(daemon_dir)
+            if not os.path.isdir(abs_dir):
+                continue
+            try:
+                entries = os.listdir(abs_dir)
+            except OSError:
+                continue
+
+            for entry in entries:
+                risk = KNOWN_SERVICE_RISKS.get(entry)
+                if not risk:
+                    continue
+
+                # Find and annotate the matching component
+                for comp in self._components.values():
+                    if comp.name.lower() == entry or entry in (
+                        p.rsplit("/", 1)[-1] for p in comp.file_paths
+                    ):
+                        comp.metadata["service_risk"] = risk
+                        break
+                else:
+                    # Service binary found but not yet identified as a component —
+                    # add it as a low-confidence detection so it shows up in SBOM
+                    rel_path = f"{daemon_dir}/{entry}"
+                    vendor_product = CPE_VENDOR_MAP.get(entry.lower())
+
+                    comp = IdentifiedComponent(
+                        name=entry,
+                        version=None,
+                        type="application",
+                        cpe=None,
+                        purl=None,
+                        supplier=vendor_product[0] if vendor_product else None,
+                        detection_source="binary_strings",
+                        detection_confidence="low",
+                        file_paths=[rel_path],
+                        metadata={"service_risk": risk},
+                    )
+                    self._add_component(comp)

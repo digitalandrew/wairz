@@ -1088,14 +1088,16 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
                 f"/{qemu_bin}", "/bin/sh", "-c", env_prefix + command,
             ]
         else:
-            # System mode: send command through QEMU's serial console socket.
-            # This is inherently messy (serial console mixes prompts/output),
-            # but it executes inside the emulated firmware instead of the
-            # host container.
+            # System mode: use serial-exec.sh to send commands through the
+            # QEMU serial console socket with proper output capture.
+            # The script wraps the command in unique markers, keeps the socat
+            # connection alive until output is captured, and extracts the
+            # guest command's stdout and exit code.
             full_cmd = env_prefix + command if env_prefix else command
             exec_cmd = [
-                "sh", "-c",
-                f"echo {shlex.quote(full_cmd)} | timeout {timeout} socat - UNIX-CONNECT:/tmp/qemu-serial.sock",
+                "/opt/scripts/serial-exec.sh",
+                full_cmd,
+                str(timeout),
             ]
 
         try:
@@ -1105,12 +1107,27 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
             stderr_bytes = exec_result.output[1] if exec_result.output[1] else b""
             exit_code = exec_result.exit_code
 
-            # `timeout` returns exit code 124 when it kills the child
+            # `timeout` and serial-exec.sh return exit code 124 for timeouts
             timed_out = exit_code == 124
 
+            stdout_str = stdout_bytes.decode("utf-8", errors="replace")
+            stderr_str = stderr_bytes.decode("utf-8", errors="replace")
+
+            # For system mode, the serial-exec.sh script outputs a timeout
+            # marker if no response was received from the guest
+            if session.mode == "system" and "WAIRZ_SERIAL_TIMEOUT" in stdout_str:
+                # Strip the marker and return whatever raw serial output was captured
+                stdout_str = stdout_str.replace("WAIRZ_SERIAL_TIMEOUT\n", "").strip()
+                if not stderr_str:
+                    stderr_str = (
+                        "No response from serial console within timeout. "
+                        "The guest OS may still be booting or no shell is available."
+                    )
+                timed_out = True
+
             return {
-                "stdout": stdout_bytes.decode("utf-8", errors="replace"),
-                "stderr": stderr_bytes.decode("utf-8", errors="replace"),
+                "stdout": stdout_str,
+                "stderr": stderr_str,
                 "exit_code": exit_code if not timed_out else -1,
                 "timed_out": timed_out,
             }

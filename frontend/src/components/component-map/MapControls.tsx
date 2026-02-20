@@ -10,7 +10,8 @@ const NODE_TYPE_OPTIONS: { type: ComponentNodeType; label: string; color: string
   { type: 'library',     label: 'Libraries',     color: 'bg-purple-500' },
   { type: 'script',      label: 'Scripts',        color: 'bg-green-500' },
   { type: 'config',      label: 'Configs',        color: 'bg-orange-500' },
-  { type: 'init_script', label: 'Init Scripts',   color: 'bg-yellow-500' },
+  { type: 'init_script',    label: 'Init Scripts',     color: 'bg-yellow-500' },
+  { type: 'kernel_module',  label: 'Kernel Modules',   color: 'bg-red-500' },
 ]
 
 interface MapControlsProps {

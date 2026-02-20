@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
-import { Cpu, Package, Terminal, Settings, Play, Layers } from 'lucide-react'
+import { Cpu, Package, Terminal, Settings, Play, Layers, Puzzle } from 'lucide-react'
 import type { ComponentNodeType } from '@/types'
 
 export interface ComponentNodeData extends Record<string, unknown> {
@@ -16,7 +16,8 @@ const nodeStyles: Record<ComponentNodeType, { bg: string; border: string; icon: 
   library:     { bg: 'bg-purple-500/10',  border: 'border-purple-500/40', icon: Package },
   script:      { bg: 'bg-green-500/10',   border: 'border-green-500/40',  icon: Terminal },
   config:      { bg: 'bg-orange-500/10',  border: 'border-orange-500/40', icon: Settings },
-  init_script: { bg: 'bg-yellow-500/10',  border: 'border-yellow-500/40', icon: Play },
+  init_script:    { bg: 'bg-yellow-500/10',  border: 'border-yellow-500/40', icon: Play },
+  kernel_module:  { bg: 'bg-red-500/10',     border: 'border-red-500/40',    icon: Puzzle },
 }
 
 const iconColor: Record<ComponentNodeType, string> = {
@@ -24,7 +25,8 @@ const iconColor: Record<ComponentNodeType, string> = {
   library:     'text-purple-400',
   script:      'text-green-400',
   config:      'text-orange-400',
-  init_script: 'text-yellow-400',
+  init_script:    'text-yellow-400',
+  kernel_module:  'text-red-400',
 }
 
 function formatSize(bytes: number): string {
