@@ -1,6 +1,6 @@
 {
   "architecture": "aarch64",
-  "description": "Ubuntu 20.04 Focal aarch64 kernel (vmlinuz) for QEMU emulation",
+  "description": "Ubuntu 20.04 Focal aarch64 kernel (vmlinuz) + custom initramfs (loads virtio_blk, firmware symlink fixes, /etc_ro population)",
   "uploaded_at": "2026-02-17T19:32:44.862457+00:00",
   "source_url": "https://cloud-images.ubuntu.com/releases/focal/release/unpacked/ubuntu-20.04-server-cloudimg-arm64-vmlinuz-generic",
   "initrd": "ubuntu-focal-aarch64-vmlinuz.initrd"
