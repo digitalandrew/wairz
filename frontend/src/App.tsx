@@ -8,6 +8,7 @@ import FindingsPage from '@/pages/FindingsPage'
 import ComponentMapPage from '@/pages/ComponentMapPage'
 import SbomPage from '@/pages/SbomPage'
 import EmulationPage from '@/pages/EmulationPage'
+import FuzzingPage from '@/pages/FuzzingPage'
 import HelpPage from '@/pages/HelpPage'
 import NotFoundPage from '@/pages/NotFoundPage'
 
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/projects/:projectId/map" element={<ComponentMapPage />} />
           <Route path="/projects/:projectId/sbom" element={<SbomPage />} />
           <Route path="/projects/:projectId/emulation" element={<EmulationPage />} />
+          <Route path="/projects/:projectId/fuzzing" element={<FuzzingPage />} />
           <Route path="/help" element={<HelpPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>

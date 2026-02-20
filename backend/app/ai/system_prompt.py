@@ -55,6 +55,16 @@ Emulation capabilities:
 - Caveats: emulated firmware may behave differently than on real hardware (missing peripherals, different timing, no flash storage). Note these limitations when reporting findings
 - Always stop emulation sessions when done to free resources
 
+Automated fuzzing:
+- Use AFL++ in QEMU mode to automatically discover crashes in firmware binaries
+- Workflow: analyze_fuzzing_target → generate_fuzzing_dictionary → generate_seed_corpus → start_fuzzing_campaign → check_fuzzing_status → triage_fuzzing_crash → add_finding
+- Best targets: binaries that parse untrusted input, are network-facing, lack protections (no NX, no canary), and use dangerous functions (strcpy, system, sprintf)
+- Always analyze the target first — the fuzzing score helps prioritize which binaries to fuzz
+- Generate a dictionary (from binary strings) and seed corpus (based on input type) for better results
+- Only one campaign can run at a time — stop campaigns when done to free resources
+- Triage each crash to determine exploitability before creating findings
+- Use source='fuzzing' when creating findings from fuzzing crashes
+
 Output format:
 - Be concise but thorough for the task at hand
 - When showing code or disassembly, highlight the relevant parts

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
 from app.config import get_settings
-from app.routers import analysis, component_map, documents, emulation, files, findings, firmware, kernels, projects, sbom, terminal
+from app.routers import analysis, component_map, documents, emulation, files, findings, firmware, fuzzing, kernels, projects, sbom, terminal
 from app.utils.sandbox import PathTraversalError
 
 
@@ -44,6 +44,7 @@ app.include_router(documents.router)
 app.include_router(sbom.router)
 app.include_router(terminal.router)
 app.include_router(emulation.router)
+app.include_router(fuzzing.router)
 app.include_router(kernels.router)
 
 

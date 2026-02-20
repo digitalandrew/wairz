@@ -306,6 +306,78 @@ export interface EmulationExecResponse {
   timed_out: boolean
 }
 
+// ── Fuzzing types ──
+
+export type FuzzingStatus = 'created' | 'running' | 'stopped' | 'completed' | 'error'
+export type CrashExploitability = 'exploitable' | 'probably_exploitable' | 'probably_not' | 'unknown'
+
+export interface FuzzingStats {
+  execs_per_sec: number
+  total_execs: number
+  corpus_count: number
+  saved_crashes: number
+  saved_hangs: number
+  stability: string | number
+  bitmap_cvg: string | number
+  last_find: number
+  run_time: number
+}
+
+export interface FuzzingCampaign {
+  id: string
+  project_id: string
+  firmware_id: string
+  binary_path: string
+  status: FuzzingStatus
+  config: Record<string, unknown> | null
+  stats: FuzzingStats | null
+  crashes_count: number
+  container_id: string | null
+  error_message: string | null
+  started_at: string | null
+  stopped_at: string | null
+  created_at: string
+}
+
+export interface FuzzingCrash {
+  id: string
+  campaign_id: string
+  crash_filename: string
+  crash_size: number | null
+  signal: string | null
+  stack_trace: string | null
+  exploitability: CrashExploitability | null
+  triage_output: string | null
+  finding_id: string | null
+  created_at: string
+}
+
+export interface FuzzingCrashDetail extends FuzzingCrash {
+  crash_input_hex: string | null
+}
+
+export interface FuzzingTargetAnalysis {
+  binary_path: string
+  fuzzing_score: number
+  input_sources: string[]
+  dangerous_functions: string[]
+  network_functions: string[]
+  protections: Record<string, unknown>
+  recommended_strategy: string
+  function_count: number
+  imports_of_interest: string[]
+  file_size: number
+  error?: string | null
+}
+
+export interface FuzzingCampaignCreateRequest {
+  binary_path: string
+  timeout_per_exec?: number
+  memory_limit?: number
+  dictionary?: string
+  seed_corpus?: string[]
+}
+
 // ── Component Map types ──
 
 export type ComponentNodeType = 'binary' | 'library' | 'script' | 'config' | 'init_script' | 'kernel_module'

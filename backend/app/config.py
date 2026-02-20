@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     emulation_image: str = "wairz-emulation"
     emulation_kernel_dir: str = "/opt/kernels"
     emulation_network: str = "wairz_emulation_net"
+    fuzzing_image: str = "wairz-fuzzing"
+    fuzzing_timeout_minutes: int = 120
+    fuzzing_max_campaigns: int = 1
+    fuzzing_memory_limit_mb: int = 2048
+    fuzzing_cpu_limit: float = 2.0
+    fuzzing_data_dir: str = "/data/fuzzing"
     log_level: str = "INFO"
 
 

@@ -45,6 +45,7 @@ services:
       GHIDRA_SCRIPTS_PATH: /opt/ghidra_scripts
       EMULATION_IMAGE: wairz-emulation
       EMULATION_NETWORK: wairz_emulation_net
+      FUZZING_IMAGE: wairz-fuzzing
     volumes:
       - firmware_data:/data/firmware
       - ./ghidra/scripts:/opt/ghidra_scripts:ro
@@ -72,6 +73,21 @@ services:
         limits:
           memory: 1024M
           cpus: "1.0"
+
+  fuzzing:
+    build:
+      context: ./fuzzing
+      dockerfile: Dockerfile
+    image: wairz-fuzzing
+    volumes:
+      - firmware_data:/data/firmware:ro
+    networks:
+      - default
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: "2.0"
 
   frontend:
     build:

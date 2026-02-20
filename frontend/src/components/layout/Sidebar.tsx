@@ -10,6 +10,7 @@ import {
   Network,
   Package,
   PlayCircle,
+  Bug,
   HelpCircle,
 } from 'lucide-react'
 import { Separator } from '@/components/ui/separator'
@@ -29,6 +30,7 @@ const projectSubPages = [
   { suffix: '/map', label: 'Component Map', icon: Network },
   { suffix: '/sbom', label: 'SBOM', icon: Package },
   { suffix: '/emulation', label: 'Emulation (experimental)', icon: PlayCircle },
+  { suffix: '/fuzzing', label: 'Fuzzing', icon: Bug },
 ]
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
