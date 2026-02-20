@@ -536,56 +536,168 @@ Removed built-in AI orchestrator (Anthropic API client, WebSocket chat endpoint,
 
 ---
 
-### Phase 11: Project Export & Import (Sessions 39–41)
+### Phase 11: Polish & Bug Fixes (Sessions 39–42)
 
-**Goal:** Enable users to export entire projects as portable `.wairz` archive files and import them on another instance.
+#### Session 11.1: Background Tasks & Status
+- Set up `arq` worker with Redis
+- Move firmware unpacking to background worker
+- Real-time status updates via WebSocket or polling
+- Progress indicators for long-running operations
+- Add `list_services` MCP tool for emulation: after system-mode boot, auto-scan for listening ports and map them to binaries (e.g., `netstat -tlnp` or `/proc/net/tcp` parsing). Returns port/protocol/binary mappings for quick service enumeration
 
-#### Session 11.1: Export Backend — Project Archive Builder
+#### Session 11.2: Error Handling & Edge Cases
+- Handle corrupt firmware, unsupported formats, large files, empty filesystems
+- Request validation, rate limiting, graceful shutdown
+- Emulation and fuzzing edge cases
+- **Ghidra analysis error diagnostics:** When `list_functions`/`list_imports` fail, return actionable error info (timeout vs memory vs corrupt binary vs unsupported format) instead of generic "produced no parseable output." Add retry with adjusted settings (e.g., longer timeout, reduced analysis depth) for large binaries
+- **Init script analysis coverage bug:** `analyze_init_scripts` only searches `/etc/init.d/` — must also search `/etc_ro/init.d/`, `/rom/etc/init.d/`, `/usr/etc/init.d/`, and follow symlinks. Many embedded devices use read-only `/etc_ro/` as the real init location with `/etc/` symlinked to tmpfs
+- **Bulk binary protections check:** Add `check_all_binary_protections` MCP tool that scans every ELF binary in the extracted filesystem and returns a summary table (binary name, NX, RELRO, canaries, PIE, Fortify) instead of requiring one call per binary
+- **Password hash identification:** Improve `analyze_config_security` and `find_hardcoded_credentials` to properly detect and classify password hashes in `/etc/passwd` and `/etc/shadow` — identify hash type (DES, MD5 `$1$`, SHA-256 `$5$`, SHA-512 `$6$`), flag weak algorithms (DES, MD5), and check against common embedded default passwords (admin, root, 1234, etc.)
+
+#### Session 11.3: Documentation & Testing
+- Comprehensive README with quick start, deployment, config reference
+- Integration tests for critical paths
+- Example firmware images for testing
+
+#### Session 11.4: Final Integration & Release
+- End-to-end testing, performance profiling, security review
+- GitHub release with docker-compose one-liner
+
+---
+
+### Phase 12: Advanced Analysis & Security Tooling (Sessions 43–45)
+
+**Goal:** Address high-impact gaps identified during real-world firmware assessments — better binary cross-referencing, automated import resolution, enhanced security scanning, and taint/dataflow analysis for finding command injection and buffer overflows.
+
+#### Session 12.1: Binary Analysis Enhancements
+
+**Do:**
+- Add `xrefs_to_string` / `find_string_refs` MCP tool (`app/ai/tools/binary.py`):
+  - Takes a binary path + string (or regex pattern) and returns all functions that reference matching strings
+  - Implementation: use r2pipe to find string addresses (`iz~<pattern>`) then get xrefs to those addresses (`axt @<addr>`)
+  - Critical for tracing interesting strings (URLs like `/goform/telnet`, format strings like `password=%s`, dangerous calls like `doSystemCmd`) back to the functions that use them
+  - Return: list of `{function_name, address, instruction, string_value}` entries
+- Add `resolve_import` MCP tool (`app/ai/tools/binary.py`):
+  - Takes a binary path + imported function name, automatically finds the implementing shared library, and returns the library path + decompiled source in one call
+  - Implementation: parse the binary's DT_NEEDED entries, search each library's exports for the function, then call `decompile_function` on the match
+  - Eliminates the manual multi-step workflow: "find import → guess which .so → search exports → decompile"
+  - Uses the component map service's existing ELF DT_NEEDED parsing logic
+- Add `check_all_binary_protections` MCP tool (also listed in 11.2 for the bulk scan):
+  - Scan all ELF binaries, return a summary table sorted by risk (fewest protections first)
+  - Include binary size and type (executable vs shared library) for context
+- Register all new tools in `app/ai/tools/__init__.py` and expose via MCP server
+
+#### Session 12.2: Enhanced Security Scanning
+
+**Do:**
+- Add `analyze_certificate` MCP tool (`app/ai/tools/security.py`):
+  - Parse X.509 certificates (PEM and DER format) and report: subject, issuer, validity dates, key size, signature algorithm, SANs, whether self-signed, key type (RSA/EC/DSA)
+  - Flag security issues: expired, weak key size (<2048 RSA), weak signature (SHA-1, MD5), self-signed, wildcard, known default/shared certificates
+  - Implementation: use Python `cryptography` library (`x509.load_pem_x509_certificate`)
+  - Also scan for certificates across the filesystem: check `/etc/ssl/`, `/etc/pki/`, and find all `.pem`, `.crt`, `.cer`, `.der` files
+- Improve `find_hardcoded_credentials` tool:
+  - Add hash type identification for passwd/shadow entries (DES, MD5 `$1$`, Blowfish `$2a$`/`$2y$`, SHA-256 `$5$`, SHA-512 `$6$`)
+  - Flag weak hash algorithms (DES, MD5) as findings
+  - Check password hashes against a built-in list of common embedded defaults (admin, root, password, 1234, default, etc.) using `crypt` module to verify
+  - Report accounts with empty passwords, uid=0 non-root accounts, and password-less login shells
+- Add `enumerate_emulation_services` MCP tool (`app/ai/tools/emulation.py`):
+  - For running system-mode emulation sessions, execute `netstat -tlnp` (or parse `/proc/net/tcp` + `/proc/*/cmdline` if netstat unavailable)
+  - Return a table of listening ports with protocol, bound address, and binary path
+  - Useful for validating which services are actually running after boot
+
+#### Session 12.3: Taint & Dataflow Analysis
+
+**Do:**
+- Add `trace_dataflow` MCP tool (`app/ai/tools/binary.py`):
+  - Trace data from user-controlled sources to dangerous sinks within a binary
+  - Sources: HTTP parameter handlers (`websGetVar`, `httpGetEnv`, `getenv`, `recv`, `read`, `fgets` from stdin/sockets), CGI input (`QUERY_STRING`, `CONTENT_LENGTH`)
+  - Sinks: `system()`, `popen()`, `exec*()`, `sprintf()` into stack buffers, `strcpy()`, `strcat()`, custom dangerous functions (e.g., `doSystemCmd()`, `twsystem()`)
+  - Implementation approach: use Ghidra headless with a custom script (`TaintAnalysis.java`) that performs intraprocedural dataflow tracking:
+    1. Identify all calls to source functions in the binary
+    2. For each source, follow the return value through registers/stack slots
+    3. Check if the tainted value reaches any sink function without sanitization
+    4. Report: source function + call site → intermediate transforms → sink function + call site
+  - Scope: intraprocedural first (within a single function), with heuristic interprocedural tracking for direct call chains
+  - Cache results in `analysis_cache` keyed by `taint_analysis:{binary_sha256}`
+  - Return: list of potential vulnerability paths with source, sink, and intermediate code snippets
+- Create `ghidra/scripts/TaintAnalysis.java`:
+  - Ghidra script that performs the dataflow analysis
+  - Configurable source/sink function lists (passed as script arguments)
+  - Outputs JSON with vulnerability paths
+- This is the highest-impact tool for finding command injection and buffer overflows in embedded web interfaces (e.g., router httpd binaries with goform handlers)
+
+---
+
+### Phase 13: Firmware Metadata & Version Comparison (Sessions 46–47)
+
+**Goal:** Provide deeper visibility into firmware image structure and enable comparative analysis across firmware versions for patch analysis and regression detection.
+
+#### Session 13.1: Firmware Image Metadata & Partition Map
+
+**Do:**
+- Add `get_firmware_metadata` MCP tool (`app/ai/tools/filesystem.py`):
+  - Parse the original firmware image to extract partition/section layout:
+    - Use binwalk scan output to identify embedded filesystems, kernels, bootloaders, and their offsets/sizes
+    - Identify compression types (LZMA, gzip, zlib, XZ) for each section
+    - Extract bootloader info (U-Boot version, environment variables) if present
+    - Parse MTD partition tables if embedded in the image
+  - Return a structured partition map: `[{name, offset, size, type, compression, description}]`
+  - Store parsed metadata in the firmware DB record or analysis_cache
+- Add `extract_bootloader_env` helper:
+  - Parse U-Boot environment variables (often at a fixed offset or in a named partition)
+  - Extract: boot command, kernel load address, bootargs, MAC address source, console settings
+  - Useful for understanding boot flow and finding hardcoded values
+- Update the frontend firmware detail view to display the partition map visually (simple table or block diagram)
+
+#### Session 13.2: Firmware Version Comparison & Binary Diffing
+
+**Do:**
+- Support multi-firmware projects: allow uploading multiple firmware versions to the same project
+  - Update `firmware` DB model and API to support multiple firmware per project
+  - Add firmware version label/tag field
+  - Frontend firmware selector to switch between versions
+- Add `diff_firmware` MCP tool:
+  - Compare two extracted firmware filesystems:
+    - Files added/removed/modified (by hash comparison)
+    - Permission changes
+    - Size changes with percentage delta
+  - Return a structured diff report grouped by directory
+- Add `diff_binary` MCP tool:
+  - Compare two versions of the same binary using r2pipe `radiff2` or Ghidra's version tracking:
+    - Functions added/removed/modified
+    - For modified functions: show disassembly diff highlighting changed instructions
+    - Basic block count changes (complexity delta)
+  - Useful for patch analysis: "what did the vendor fix between v1.0 and v1.1?"
+- Frontend: side-by-side comparison view with file diff and binary diff panels
+
+---
+
+### Phase 14: Project Export & Import (Sessions 48–50)
+
+**Goal:** Enable users to export entire projects as portable `.wairz` archive files and import them on another instance. This phase is intentionally last so the archive format captures all features: findings, documents, analysis cache, SBOM data, emulation configs, fuzzing campaigns, and firmware comparison data.
+
+#### Session 14.1: Export Backend — Project Archive Builder
 
 **Do:**
 - Create `app/services/export_service.py` — builds a self-contained ZIP archive containing:
   - `manifest.json`, `project.json`, `firmware.json`
   - `firmware/original/` and `firmware/extracted/` (with permissions manifest)
-  - `conversations/`, `findings/`, `documents/`, `analysis_cache/`, `sbom/`, `fuzzing_campaigns/`, `reviews/`
+  - `findings/`, `documents/`, `analysis_cache/`, `sbom/`, `fuzzing_campaigns/`
 - `POST /api/v1/projects/{id}/export` — streaming ZIP download with `.wairz` extension
 
-#### Session 11.2: Import Backend — Project Archive Importer
+#### Session 14.2: Import Backend — Project Archive Importer
 
 **Do:**
 - Validate archive, create new project with remapped UUIDs, restore all data
 - `POST /api/v1/projects/import` — multipart upload of `.wairz` archive
 - ZIP slip and path traversal prevention
 
-#### Session 11.3: Export/Import Frontend
+#### Session 14.3: Export/Import Frontend
 
 **Do:**
 - Export button on project detail page with progress indicator
 - Import button on projects page with file picker and upload progress
 - Error handling for invalid archives
-
----
-
-### Phase 12: Polish & Release (Sessions 42–45)
-
-#### Session 12.1: Background Tasks & Status
-- Set up `arq` worker with Redis
-- Move firmware unpacking to background worker
-- Real-time status updates via WebSocket or polling
-- Progress indicators for long-running operations
-
-#### Session 12.2: Error Handling & Edge Cases
-- Handle corrupt firmware, unsupported formats, large files, empty filesystems
-- Request validation, rate limiting, graceful shutdown
-- Emulation and fuzzing edge cases
-
-#### Session 12.3: Documentation & Testing
-- Comprehensive README with quick start, deployment, config reference
-- Integration tests for critical paths
-- Example firmware images for testing
-
-#### Session 12.4: Final Integration & Release
-- End-to-end testing, performance profiling, security review
-- GitHub release with docker-compose one-liner
 
 ---
 
