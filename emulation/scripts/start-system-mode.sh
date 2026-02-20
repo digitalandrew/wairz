@@ -103,17 +103,6 @@ esac
 # Clean up stale files from previous runs
 rm -f "$SERIAL_SOCK" "$ROOTFS_IMG"
 
-# Build port forwarding for user-mode networking
-NET_ARGS="-net nic -net user"
-if [ -n "$PORT_FORWARDS" ]; then
-    IFS=',' read -ra PAIRS <<< "$PORT_FORWARDS"
-    for pair in "${PAIRS[@]}"; do
-        host_port="${pair%%:*}"
-        guest_port="${pair##*:}"
-        NET_ARGS="$NET_ARGS,hostfwd=tcp::${host_port}-:${guest_port}"
-    done
-fi
-
 # Create a temporary ext4 image from the rootfs
 echo "Creating ext4 rootfs image (256 MB)..."
 dd if=/dev/zero of="$ROOTFS_IMG" bs=1M count=256 2>/dev/null
@@ -138,6 +127,7 @@ case "$ARCH" in
         ROOT_DEV="/dev/sda"
         CPU_ARGS=""
         GUEST_RAM="256"  # versatilepb max is 256MB
+        NIC_DEVICE="smc91c111"  # built into versatilepb machine
         ;;
     aarch64|arm64)
         QEMU_BIN="qemu-system-aarch64"
@@ -147,6 +137,7 @@ case "$ARCH" in
         ROOT_DEV="/dev/vda"
         CPU_ARGS="-cpu cortex-a57"
         GUEST_RAM="512"
+        NIC_DEVICE="virtio-net-pci"  # standard for virt machine
         ;;
     mips|mipsbe)
         QEMU_BIN="qemu-system-mips"
@@ -156,6 +147,7 @@ case "$ARCH" in
         ROOT_DEV="/dev/sda"
         CPU_ARGS="-cpu 34Kf"  # MIPS32r2 + DSP + FPU (4Kc default only supports r1)
         GUEST_RAM="256"  # malta max is 256MB
+        NIC_DEVICE="pcnet"  # Malta native NIC; pcnet32+mii modules loaded by initramfs
         ;;
     mipsel|mipsle)
         QEMU_BIN="qemu-system-mipsel"
@@ -165,6 +157,7 @@ case "$ARCH" in
         ROOT_DEV="/dev/sda"
         CPU_ARGS="-cpu 34Kf"  # MIPS32r2 + DSP + FPU (4Kc default only supports r1)
         GUEST_RAM="256"  # malta max is 256MB
+        NIC_DEVICE="pcnet"  # Malta native NIC; pcnet32+mii modules loaded by initramfs
         ;;
     x86|i386|i686)
         QEMU_BIN="qemu-system-i386"
@@ -174,6 +167,7 @@ case "$ARCH" in
         ROOT_DEV="/dev/sda"
         CPU_ARGS=""
         GUEST_RAM="512"
+        NIC_DEVICE="e1000"  # built into most x86 kernels
         ;;
     x86_64|amd64)
         QEMU_BIN="qemu-system-x86_64"
@@ -183,12 +177,27 @@ case "$ARCH" in
         ROOT_DEV="/dev/sda"
         CPU_ARGS=""
         GUEST_RAM="512"
+        NIC_DEVICE="e1000"  # built into most x86 kernels
         ;;
     *)
         echo "ERROR: Unsupported architecture: $ARCH"
         exit 1
         ;;
 esac
+
+# Build networking with explicit NIC device per architecture.
+# Uses modern -device/-netdev syntax instead of legacy -net nic/-net user.
+# Port forwarding is appended to the -netdev user arg.
+NETDEV_ARGS="user,id=net0"
+if [ -n "$PORT_FORWARDS" ]; then
+    IFS=',' read -ra PAIRS <<< "$PORT_FORWARDS"
+    for pair in "${PAIRS[@]}"; do
+        host_port="${pair%%:*}"
+        guest_port="${pair##*:}"
+        NETDEV_ARGS="${NETDEV_ARGS},hostfwd=tcp::${host_port}-:${guest_port}"
+    done
+fi
+NET_ARGS="-device ${NIC_DEVICE},netdev=net0 -netdev ${NETDEV_ARGS}"
 
 # Verify QEMU binary exists
 if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then

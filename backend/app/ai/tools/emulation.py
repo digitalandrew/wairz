@@ -158,7 +158,9 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "Returns stdout, stderr, and exit code. "
             "Use this for dynamic analysis: check running services, test credentials, "
             "inspect network configuration, run binaries with different inputs. "
-            "Default timeout is 30 seconds, max 120 seconds."
+            "Default timeout is 30 seconds, max 120 seconds. "
+            "If a previous command is stuck (e.g., a foreground daemon), set "
+            "send_ctrl_c=true to send Ctrl-C before executing the new command."
         ),
         input_schema={
             "type": "object",
@@ -181,6 +183,14 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
                     "description": (
                         "Environment variables to set for this command "
                         "(e.g., {\"LD_LIBRARY_PATH\": \"/lib\", \"DEBUG\": \"1\"})"
+                    ),
+                },
+                "send_ctrl_c": {
+                    "type": "boolean",
+                    "description": (
+                        "Send Ctrl-C to the serial console before executing the command. "
+                        "Use this to recover from a stuck foreground process (e.g., a "
+                        "daemon that didn't background itself). Only applies to system-mode sessions."
                     ),
                 },
             },
@@ -360,6 +370,14 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
     if mode == "user" and not binary_path:
         return "Error: binary_path is required for user-mode emulation."
 
+    # For system mode, auto-run diagnosis first to give immediate context
+    diagnosis_summary = ""
+    if mode == "system":
+        try:
+            diagnosis_summary = await _handle_diagnose_environment({}, context)
+        except Exception:
+            diagnosis_summary = "(diagnosis failed — continuing with emulation start)"
+
     # Get firmware record
     result = await context.db.execute(
         select(Firmware).where(Firmware.id == context.firmware_id)
@@ -411,6 +429,12 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
         "and stop_emulation when done."
     )
 
+    # Append diagnosis for system-mode starts
+    if diagnosis_summary:
+        lines.append("")
+        lines.append("--- Pre-flight Diagnosis ---")
+        lines.append(diagnosis_summary)
+
     return "\n".join(lines)
 
 
@@ -420,11 +444,26 @@ async def _handle_run_command(input: dict, context: ToolContext) -> str:
     command = input.get("command")
     timeout = min(input.get("timeout", 30), 120)
     environment = input.get("environment")
+    send_ctrl_c = input.get("send_ctrl_c", False)
 
     if not session_id or not command:
         return "Error: session_id and command are required."
 
     svc = EmulationService(context.db)
+
+    # Send Ctrl-C first if requested (to recover from stuck foreground process)
+    if send_ctrl_c:
+        try:
+            from uuid import UUID as _UUID
+            ctrl_c_result = await svc.send_ctrl_c(_UUID(session_id))
+            if not ctrl_c_result.get("success"):
+                return f"Error sending Ctrl-C: {ctrl_c_result.get('message', 'unknown error')}"
+            # Brief pause to let the shell settle after Ctrl-C
+            import asyncio
+            await asyncio.sleep(0.5)
+        except ValueError as exc:
+            return f"Error sending Ctrl-C: {exc}"
+
     try:
         from uuid import UUID
         result = await svc.exec_command(

@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import platform
+import re
 import shlex
 from datetime import datetime, timezone
 from uuid import UUID
@@ -103,6 +104,12 @@ BINFMT_ENTRIES: dict[str, tuple[str, str]] = {
 
 # Detect host architecture so we can skip binfmt_misc for native binaries
 _HOST_ARCH = ARCH_ALIASES.get(platform.machine())
+
+# Regex to strip ANSI escape sequences, OSC sequences, and carriage returns
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r")
+
+# Regex to strip residual serial-exec markers that may leak through
+_MARKER_RE = re.compile(r"WAIRZ_(?:START|END)_WZE\w+")
 
 
 def _validate_kernel_file(path: str) -> tuple[bool, str]:
@@ -1119,6 +1126,13 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
             stdout_str = stdout_bytes.decode("utf-8", errors="replace")
             stderr_str = stderr_bytes.decode("utf-8", errors="replace")
 
+            # Strip ANSI escape codes and residual markers (safety net for
+            # anything serial-exec.sh misses or user-mode terminal output)
+            if session.mode == "system":
+                stdout_str = _ANSI_RE.sub("", stdout_str)
+                stdout_str = _MARKER_RE.sub("", stdout_str)
+                stderr_str = _ANSI_RE.sub("", stderr_str)
+
             # For system mode, the serial-exec.sh script outputs a timeout
             # marker if no response was received from the guest
             if session.mode == "system" and "WAIRZ_SERIAL_TIMEOUT" in stdout_str:
@@ -1140,6 +1154,50 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
 
         except Exception as exc:
             raise ValueError(f"Command execution failed: {exc}")
+
+    async def send_ctrl_c(self, session_id: UUID) -> dict:
+        """Send Ctrl-C to a running system-mode emulation session.
+
+        This kills any stuck foreground process on the serial console,
+        allowing subsequent commands to execute. Only works for system-mode
+        sessions (user-mode sessions don't have a serial console).
+        """
+        result = await self.db.execute(
+            select(EmulationSession).where(EmulationSession.id == session_id)
+        )
+        session = result.scalar_one_or_none()
+        if not session:
+            raise ValueError("Session not found")
+        if session.status != "running":
+            raise ValueError(f"Session is not running (status: {session.status})")
+        if session.mode != "system":
+            raise ValueError("send_ctrl_c is only supported for system-mode sessions")
+        if not session.container_id:
+            raise ValueError("No container associated with this session")
+
+        client = self._get_docker_client()
+        try:
+            container = client.containers.get(session.container_id)
+        except docker.errors.NotFound:
+            session.status = "error"
+            session.error_message = "Container not found"
+            await self.db.flush()
+            raise ValueError("Container not found — session may have been terminated")
+
+        # Send Ctrl-C (\x03) followed by a newline to the serial socket
+        ctrl_c_cmd = [
+            "sh", "-c",
+            "printf '\\x03\\n' | socat - UNIX-CONNECT:/tmp/qemu-serial.sock",
+        ]
+        try:
+            exec_result = container.exec_run(ctrl_c_cmd, demux=True)
+            stdout = (exec_result.output[0] or b"").decode("utf-8", errors="replace")
+            return {
+                "success": exec_result.exit_code == 0,
+                "message": "Ctrl-C sent to serial console" if exec_result.exit_code == 0 else f"Failed: {stdout}",
+            }
+        except Exception as exc:
+            raise ValueError(f"Failed to send Ctrl-C: {exc}")
 
     async def get_status(self, session_id: UUID) -> EmulationSession:
         """Get the status of an emulation session, updating from Docker if running."""
