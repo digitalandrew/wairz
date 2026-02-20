@@ -1,8 +1,11 @@
 """Emulation AI tools for dynamic firmware analysis.
 
 Tools for starting/stopping QEMU emulation sessions, executing commands
-in running sessions, checking session status, and listing available kernels.
+in running sessions, checking session status, listing available kernels,
+reading boot logs, and diagnosing firmware emulation issues.
 """
+
+import os
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.config import get_settings
@@ -222,6 +225,48 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             },
         },
         handler=_handle_check_status,
+    )
+
+    registry.register(
+        name="get_emulation_logs",
+        description=(
+            "Read QEMU boot logs and serial console output from an emulation session. "
+            "Use this to diagnose WHY emulation failed or why the firmware isn't booting "
+            "correctly. Works on both running and recently-stopped/errored sessions. "
+            "The logs contain kernel boot messages, init script output, error messages, "
+            "and any panic/crash information. Always check logs when emulation status "
+            "is 'error' or when commands timeout."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The emulation session ID to read logs from",
+                },
+            },
+            "required": ["session_id"],
+        },
+        handler=_handle_get_logs,
+    )
+
+    registry.register(
+        name="diagnose_emulation_environment",
+        description=(
+            "Pre-flight check: inspect the firmware filesystem for known issues that "
+            "cause emulation failures. Run this BEFORE starting system-mode emulation, "
+            "or AFTER a failed boot to understand what went wrong. "
+            "Checks for: broken symlinks (e.g., /etc -> /dev/null), missing init binary, "
+            "missing /etc/passwd, architecture mismatches, missing shared libraries, "
+            "and other common embedded firmware quirks. "
+            "Returns a structured report with issues found and suggested fixes "
+            "(e.g., use init_path=/bin/sh, or which commands to run to fix the environment)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        handler=_handle_diagnose_environment,
     )
 
 
@@ -489,5 +534,389 @@ async def _handle_check_status(input: dict, context: ToolContext) -> str:
 
     if len(sessions) > 10:
         lines.append(f"  ... and {len(sessions) - 10} more")
+
+    return "\n".join(lines)
+
+
+async def _handle_get_logs(input: dict, context: ToolContext) -> str:
+    """Read QEMU boot logs from an emulation session."""
+    session_id = input.get("session_id")
+    if not session_id:
+        return "Error: session_id is required."
+
+    svc = EmulationService(context.db)
+    try:
+        from uuid import UUID
+        logs = await svc.get_session_logs(UUID(session_id))
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except Exception as exc:
+        return f"Error reading logs: {exc}"
+
+    # Truncate if needed
+    settings = get_settings()
+    max_bytes = settings.max_tool_output_kb * 1024
+    if len(logs) > max_bytes:
+        logs = logs[-max_bytes:] + f"\n... [truncated to last {settings.max_tool_output_kb}KB]"
+
+    return f"=== Emulation Boot Logs ===\n{logs}"
+
+
+async def _handle_diagnose_environment(input: dict, context: ToolContext) -> str:
+    """Pre-flight check of firmware filesystem for emulation compatibility."""
+    # Get firmware record
+    result = await context.db.execute(
+        select(Firmware).where(Firmware.id == context.firmware_id)
+    )
+    firmware = result.scalar_one_or_none()
+    if not firmware:
+        return "Error: firmware not found."
+
+    if not firmware.extracted_path:
+        return "Error: firmware has not been unpacked yet."
+
+    fs_root = firmware.extracted_path
+    if not os.path.isdir(fs_root):
+        return f"Error: extracted filesystem not found at {fs_root}"
+
+    arch = firmware.architecture or "unknown"
+    issues: list[str] = []
+    info: list[str] = []
+    suggestions: list[str] = []
+
+    # --- 1. Check for broken /dev/null symlinks ---
+    broken_symlinks = []
+    for dirname in ["etc", "tmp", "home", "root", "var", "run",
+                     "debug", "webroot", "media"]:
+        path = os.path.join(fs_root, dirname)
+        if os.path.islink(path):
+            target = os.readlink(path)
+            if target in ("/dev/null", "dev/null") or target.startswith("/dev/"):
+                broken_symlinks.append(f"/{dirname} -> {target}")
+    if broken_symlinks:
+        issues.append(
+            f"BROKEN SYMLINKS: {len(broken_symlinks)} directories are symlinked to "
+            f"/dev/null or similar:\n"
+            + "\n".join(f"    {s}" for s in broken_symlinks)
+        )
+        info.append(
+            "The custom initramfs will automatically fix these broken symlinks "
+            "before switch_root. This is handled for all architectures (ARM, "
+            "aarch64, MIPSel)."
+        )
+
+    # --- 2. Check for /etc_ro (common in Tenda, TP-Link, etc.) ---
+    etc_ro = os.path.join(fs_root, "etc_ro")
+    has_etc_ro = os.path.isdir(etc_ro)
+    if has_etc_ro:
+        etc_path = os.path.join(fs_root, "etc")
+        etc_is_link = os.path.islink(etc_path)
+        etc_is_empty = (
+            os.path.isdir(etc_path)
+            and not os.path.islink(etc_path)
+            and len(os.listdir(etc_path)) == 0
+        )
+        if etc_is_link or etc_is_empty:
+            info.append(
+                "FIRMWARE USES /etc_ro: Configuration files are in /etc_ro/ "
+                "(read-only). The initramfs will populate /etc from /etc_ro "
+                "automatically."
+            )
+        else:
+            info.append(
+                "Firmware has both /etc and /etc_ro directories. /etc appears "
+                "to already have content."
+            )
+
+    # --- 3. Check init binary ---
+    init_candidates = [
+        "sbin/init", "bin/init", "init", "linuxrc",
+        "sbin/procd", "usr/sbin/init",
+    ]
+    found_inits = []
+    for candidate in init_candidates:
+        path = os.path.join(fs_root, candidate)
+        if os.path.exists(path) or os.path.islink(path):
+            if os.path.islink(path):
+                target = os.readlink(path)
+                found_inits.append(f"/{candidate} -> {target}")
+            else:
+                found_inits.append(f"/{candidate}")
+
+    if not found_inits:
+        issues.append(
+            "NO INIT BINARY: None of the standard init paths exist: "
+            + ", ".join(f"/{c}" for c in init_candidates)
+        )
+        suggestions.append(
+            "Try starting with init_path='/bin/sh' to get a shell, "
+            "then manually investigate what init system the firmware uses."
+        )
+    else:
+        info.append("Init binaries found: " + ", ".join(found_inits))
+
+    # --- 4. Check for busybox (shell availability) ---
+    bb_paths = ["bin/busybox", "usr/bin/busybox", "sbin/busybox"]
+    found_bb = None
+    for bp in bb_paths:
+        full = os.path.join(fs_root, bp)
+        if os.path.isfile(full) and not os.path.islink(full):
+            try:
+                size = os.path.getsize(full)
+                if size > 1000:
+                    found_bb = f"/{bp} ({size // 1024}KB)"
+                    break
+            except OSError:
+                pass
+    if found_bb:
+        info.append(f"Busybox: {found_bb}")
+    else:
+        issues.append(
+            "NO BUSYBOX: No busybox binary found. Shell commands may not "
+            "work inside the emulated firmware."
+        )
+
+    # --- 5. Check /etc/passwd ---
+    passwd_paths = ["etc/passwd"]
+    if has_etc_ro:
+        passwd_paths.append("etc_ro/passwd")
+    found_passwd = False
+    for pp in passwd_paths:
+        full = os.path.join(fs_root, pp)
+        if os.path.isfile(full):
+            try:
+                with open(full) as f:
+                    content = f.read(512)
+                content = content.replace("\x00", "").strip()
+                if content and "root:" in content:
+                    found_passwd = True
+                    # Check if root has a password
+                    for line in content.split("\n"):
+                        if line.startswith("root:"):
+                            parts = line.split(":")
+                            if len(parts) >= 2:
+                                pw = parts[1]
+                                if pw in ("", "x"):
+                                    info.append(
+                                        f"/{pp}: root account found "
+                                        f"(password in shadow or empty)"
+                                    )
+                                elif pw.startswith("$"):
+                                    info.append(
+                                        f"/{pp}: root account found (hashed password)"
+                                    )
+                                else:
+                                    info.append(f"/{pp}: root account found")
+                            break
+            except OSError:
+                pass
+    if not found_passwd:
+        if any("etc" in s for s in broken_symlinks):
+            issues.append(
+                "NO /etc/passwd: /etc is a broken symlink, so passwd is "
+                "missing. The initramfs will fix this by populating /etc "
+                "from /etc_ro (if available)."
+            )
+        else:
+            issues.append(
+                "NO /etc/passwd: No passwd file found. Login-based init "
+                "systems (sulogin, getty) will fail."
+            )
+            suggestions.append(
+                "Use init_path='/bin/sh' to bypass login, or create a "
+                "minimal passwd file inside the emulated environment."
+            )
+
+    # --- 6. Check /etc/inittab or init scripts ---
+    inittab = os.path.join(fs_root, "etc", "inittab")
+    inittab_ro = os.path.join(fs_root, "etc_ro", "inittab")
+    found_inittab = None
+    for itab in [inittab, inittab_ro]:
+        if os.path.isfile(itab):
+            try:
+                with open(itab) as f:
+                    content = f.read(2048).replace("\x00", "").strip()
+                if content:
+                    found_inittab = itab.replace(fs_root, "")
+                    # Check for sulogin/askfirst entries
+                    if "sulogin" in content:
+                        issues.append(
+                            f"SULOGIN in {found_inittab}: inittab uses "
+                            "sulogin which requires a root password. If "
+                            "boot hangs at 'Give root password', the "
+                            "initramfs has already fixed /etc from /etc_ro "
+                            "so the password hash should be available."
+                        )
+                        suggestions.append(
+                            "If sulogin still blocks boot, try "
+                            "init_path='/bin/sh' to bypass it entirely."
+                        )
+                    if "askfirst" in content or "respawn" in content:
+                        info.append(
+                            f"{found_inittab}: uses BusyBox init "
+                            "(askfirst/respawn entries found)"
+                        )
+                    break
+            except OSError:
+                pass
+
+    # --- 7. Check init.d/rcS for startup scripts ---
+    rcs_dirs = ["etc/init.d", "etc_ro/init.d"]
+    for rcs_dir in rcs_dirs:
+        full = os.path.join(fs_root, rcs_dir)
+        if os.path.isdir(full):
+            try:
+                scripts = [f for f in os.listdir(full)
+                           if not f.startswith(".")]
+                info.append(
+                    f"/{rcs_dir}/: {len(scripts)} init scripts"
+                )
+                # Check for rcS specifically
+                rcs = os.path.join(full, "rcS")
+                if os.path.isfile(rcs):
+                    try:
+                        with open(rcs) as f:
+                            rcs_content = f.read(4096)
+                        rcs_content = rcs_content.replace("\x00", "")
+                        # Look for common patterns that fail in emulation
+                        if "mount" in rcs_content and "mtd" in rcs_content:
+                            issues.append(
+                                f"/{rcs_dir}/rcS: references MTD flash "
+                                "partitions. These don't exist in QEMU and "
+                                "will cause mount errors (expected)."
+                            )
+                        if "insmod" in rcs_content or "modprobe" in rcs_content:
+                            info.append(
+                                f"/{rcs_dir}/rcS: loads kernel modules "
+                                "(some will fail since QEMU uses a "
+                                "different kernel — expected)."
+                            )
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+
+    # --- 8. Check architecture of key binaries ---
+    try:
+        from elftools.elf.elffile import ELFFile
+        elf_arch_map = {
+            "EM_MIPS": "mips", "EM_ARM": "arm",
+            "EM_AARCH64": "aarch64", "EM_386": "x86",
+            "EM_X86_64": "x86_64",
+        }
+        for check_bin in ["bin/busybox", "sbin/init", "bin/sh"]:
+            full = os.path.join(fs_root, check_bin)
+            if os.path.isfile(full) and not os.path.islink(full):
+                try:
+                    with open(full, "rb") as f:
+                        if f.read(4) == b"\x7fELF":
+                            f.seek(0)
+                            elf = ELFFile(f)
+                            bin_arch = elf_arch_map.get(
+                                elf.header.e_machine,
+                                str(elf.header.e_machine),
+                            )
+                            endian = "LE" if elf.little_endian else "BE"
+                            if bin_arch == "mips" and elf.little_endian:
+                                bin_arch = "mipsel"
+                            info.append(
+                                f"/{check_bin}: {bin_arch} ({endian})"
+                            )
+                            # Check for architecture mismatch
+                            if arch != "unknown" and bin_arch != arch:
+                                issues.append(
+                                    f"ARCH MISMATCH: /{check_bin} is "
+                                    f"{bin_arch} but firmware detected as "
+                                    f"{arch}. The kernel must match the "
+                                    "binary architecture."
+                                )
+                except Exception:
+                    pass
+    except ImportError:
+        pass
+
+    # --- 9. Check shared library availability ---
+    lib_dirs = ["lib", "usr/lib", "lib32"]
+    total_libs = 0
+    for ld in lib_dirs:
+        full = os.path.join(fs_root, ld)
+        if os.path.isdir(full):
+            try:
+                libs = [f for f in os.listdir(full)
+                        if f.endswith(".so") or ".so." in f]
+                total_libs += len(libs)
+            except OSError:
+                pass
+    if total_libs > 0:
+        info.append(f"Shared libraries: {total_libs} .so files found")
+    else:
+        issues.append(
+            "NO SHARED LIBRARIES: No .so files found in /lib or /usr/lib. "
+            "Dynamically linked binaries will fail to run."
+        )
+
+    # --- 10. Check kernel availability ---
+    svc = KernelService()
+    kernels = svc.list_kernels(architecture=arch)
+    if kernels:
+        k = kernels[0]
+        initrd_note = " (with initramfs)" if k.get("has_initrd") else " (NO initramfs)"
+        info.append(
+            f"Kernel available: {k['name']} [{k['architecture']}]"
+            f"{initrd_note}"
+        )
+        if not k.get("has_initrd") and broken_symlinks:
+            issues.append(
+                "KERNEL HAS NO INITRAMFS: The firmware has broken symlinks "
+                "that need fixing at boot time, but the kernel has no "
+                "companion initramfs to perform the fixes."
+            )
+            suggestions.append(
+                "Upload a custom initramfs for this kernel, or use a "
+                "different kernel that has one."
+            )
+    else:
+        issues.append(
+            f"NO KERNEL: No pre-built kernel available for architecture "
+            f"'{arch}'. System-mode emulation cannot start."
+        )
+        suggestions.append(
+            "Use download_kernel to fetch a kernel, or upload one via "
+            "the kernel management page."
+        )
+
+    # --- Build report ---
+    lines = [
+        f"=== Emulation Pre-Flight Diagnosis ===",
+        f"Firmware: {firmware.original_filename}",
+        f"Architecture: {arch} ({firmware.endianness or 'unknown'} endian)",
+        f"Filesystem root: {fs_root}",
+        "",
+    ]
+
+    if issues:
+        lines.append(f"ISSUES FOUND ({len(issues)}):")
+        for i, issue in enumerate(issues, 1):
+            lines.append(f"  {i}. {issue}")
+        lines.append("")
+
+    if info:
+        lines.append("ENVIRONMENT INFO:")
+        for item in info:
+            lines.append(f"  - {item}")
+        lines.append("")
+
+    if suggestions:
+        lines.append("SUGGESTED FIXES:")
+        for i, sug in enumerate(suggestions, 1):
+            lines.append(f"  {i}. {sug}")
+        lines.append("")
+
+    if not issues:
+        lines.append(
+            "No critical issues detected. The firmware should be compatible "
+            "with system-mode emulation. Note that some runtime errors are "
+            "expected (missing hardware, MTD flash, SoC-specific modules)."
+        )
 
     return "\n".join(lines)

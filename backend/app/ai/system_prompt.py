@@ -55,6 +55,40 @@ Emulation capabilities:
 - Caveats: emulated firmware may behave differently than on real hardware (missing peripherals, different timing, no flash storage). Note these limitations when reporting findings
 - Always stop emulation sessions when done to free resources
 
+Emulation troubleshooting — follow this workflow when emulation fails:
+1. BEFORE starting: run diagnose_emulation_environment to check for known issues
+2. If system-mode emulation fails or commands timeout:
+   a. Use get_emulation_logs to read the QEMU boot log — this shows kernel messages, init output, and errors
+   b. Use check_emulation_status to see if the session is still running or errored
+3. Common failure patterns and fixes:
+   - "sulogin: no password entry for root" or "Give root password":
+     The firmware's /etc/passwd is missing (likely /etc was a broken symlink).
+     The initramfs should fix this automatically, but if it doesn't, try init_path='/bin/sh'
+   - Kernel panic / "Coprocessor Unusable" / SIGILL:
+     Architecture or FPU mismatch between kernel and firmware. Check that the kernel matches
+     the firmware architecture. MIPS firmware needs a kernel with FPU support (34Kf CPU).
+   - "No response from serial console" (timeout):
+     The firmware may still be booting (some take 30+ seconds), or init is stuck in a loop.
+     Try: (a) wait longer and retry the command, (b) use init_path='/bin/sh' to bypass init,
+     (c) read logs with get_emulation_logs to see where boot stalled
+   - "can't access tty" / "job control turned off":
+     Normal for init_path='/bin/sh' — the shell works, just ignore the warning
+   - Module load failures ("insmod: can't insert module"):
+     Expected — QEMU uses a generic kernel, not the firmware's SoC-specific kernel.
+     SoC-specific modules (wifi, flash, GPIO) will fail. This is normal.
+   - "mount: mounting /dev/mtdblockN failed":
+     Expected — QEMU doesn't emulate MTD flash partitions. Services depending on
+     flash-stored config will fail. Focus on network-facing services instead.
+   - Services crash immediately:
+     Many embedded services depend on SoC hardware (flash, GPIO, watchdog).
+     This is expected. Focus on services that work (httpd, telnetd, sshd, etc.).
+4. Debugging strategy for system mode:
+   - Start with init_path='/bin/sh' to get a working shell first
+   - Run basic commands: 'ls /', 'cat /etc/passwd', 'ls /bin/' to verify the filesystem
+   - Manually start individual services: '/usr/sbin/httpd &' rather than relying on full init
+   - Check what's listening: 'netstat -tlnp' or parse /proc/net/tcp if netstat is unavailable
+5. If all else fails, fall back to user-mode emulation for testing individual binaries
+
 Automated fuzzing:
 - Use AFL++ in QEMU mode to automatically discover crashes in firmware binaries
 - Workflow: analyze_fuzzing_target → generate_fuzzing_dictionary → generate_seed_corpus → start_fuzzing_campaign → check_fuzzing_status → triage_fuzzing_crash → add_finding
