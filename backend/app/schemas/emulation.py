@@ -17,6 +17,7 @@ class EmulationStartRequest(BaseModel):
     port_forwards: list[PortForward] = []
     kernel_name: str | None = None
     init_path: str | None = None  # Override /sbin/init (e.g., "/bin/sh" or "/bin/busybox")
+    pre_init_script: str | None = None  # Shell script to run before firmware init (e.g., start cfmd, set up LD_PRELOAD)
 
 
 class EmulationSessionResponse(BaseModel):

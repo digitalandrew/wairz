@@ -61,6 +61,7 @@ async def start_emulation(
             port_forwards=[pf.model_dump() for pf in request.port_forwards],
             kernel_name=request.kernel_name,
             init_path=request.init_path,
+            pre_init_script=request.pre_init_script,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))

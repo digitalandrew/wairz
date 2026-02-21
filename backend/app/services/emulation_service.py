@@ -305,6 +305,7 @@ class EmulationService:
         port_forwards: list[dict] | None = None,
         kernel_name: str | None = None,
         init_path: str | None = None,
+        pre_init_script: str | None = None,
     ) -> EmulationSession:
         """Start a new emulation session.
 
@@ -316,6 +317,7 @@ class EmulationService:
             port_forwards: List of {"host": int, "guest": int} dicts.
             kernel_name: Specific kernel to use for system mode.
             init_path: Override init binary for system mode (e.g., "/bin/sh").
+            pre_init_script: Shell script to run before firmware init (system mode).
         """
         if mode not in ("user", "system"):
             raise ValueError("mode must be 'user' or 'system'")
@@ -367,6 +369,7 @@ class EmulationService:
                 kernel_name=kernel_name,
                 firmware_kernel_path=firmware.kernel_path,
                 init_path=init_path,
+                pre_init_script=pre_init_script,
             )
             session.container_id = container_id
             session.status = "running"
@@ -631,6 +634,50 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
         if output:
             logger.info("Firmware symlink repair: %s", output)
 
+    # Map canonical architecture → stub library filename
+    STUB_MAP: dict[str, str] = {
+        "mipsel": "fake_mtd_mipsel.so",
+        "mips": "fake_mtd_mips.so",
+        "arm": "fake_mtd_arm.so",
+        "aarch64": "fake_mtd_aarch64.so",
+    }
+
+    @staticmethod
+    def _inject_stub_libraries(
+        container: "docker.models.containers.Container",
+        architecture: str | None,
+    ) -> None:
+        """Copy arch-matched LD_PRELOAD stub libraries into the firmware rootfs.
+
+        Pre-compiled stubs live in /opt/stubs/ inside the emulation container.
+        This copies the appropriate one into /firmware/opt/stubs/fake_mtd.so
+        so it's available inside the emulated firmware via:
+            export LD_PRELOAD=/opt/stubs/fake_mtd.so
+        """
+        if not architecture:
+            return
+
+        stub_file = EmulationService.STUB_MAP.get(architecture)
+        if not stub_file:
+            logger.debug("No stub library available for architecture: %s", architecture)
+            return
+
+        result = container.exec_run([
+            "sh", "-c",
+            f"if [ -f /opt/stubs/{stub_file} ]; then "
+            f"mkdir -p /firmware/opt/stubs && "
+            f"cp /opt/stubs/{stub_file} /firmware/opt/stubs/fake_mtd.so && "
+            f"chmod 755 /firmware/opt/stubs/fake_mtd.so && "
+            f"echo OK; else echo MISSING; fi"
+        ])
+        output = result.output.decode("utf-8", errors="replace").strip()
+        if "OK" in output:
+            logger.info("Injected stub library: /opt/stubs/%s -> /firmware/opt/stubs/fake_mtd.so", stub_file)
+        elif "MISSING" in output:
+            logger.debug("Stub library not found in container: /opt/stubs/%s", stub_file)
+        else:
+            logger.warning("Stub library injection returned unexpected output: %s", output)
+
     def _find_initrd(
         self,
         kernel_path: str | None,
@@ -662,6 +709,124 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
 
         return None
 
+    @staticmethod
+    def _generate_init_wrapper(
+        original_init: str | None = None,
+        pre_init_script: str | None = None,
+    ) -> str:
+        """Generate a wairz init wrapper script for system-mode emulation.
+
+        The wrapper runs before the firmware's own init and handles:
+        - Mounting proc, sysfs, devtmpfs, tmpfs
+        - Configuring networking (QEMU user-mode always uses 10.0.2.0/24)
+        - Sourcing an optional pre-init script for firmware-specific setup
+          (e.g., LD_PRELOAD, fake MTD, starting cfmd)
+        - Executing the firmware's original init or an interactive shell
+        """
+        # Determine what to exec after setup
+        if original_init:
+            exec_line = f'exec {original_init}'
+        else:
+            # Auto-detect init: try common paths in order
+            exec_line = """# Auto-detect init
+for candidate in /sbin/init /etc/preinit /sbin/procd /init /linuxrc; do
+    if [ -x "$candidate" ] || [ -L "$candidate" ]; then
+        exec "$candidate"
+    fi
+done
+# Fallback to shell
+echo "[wairz] No init found, dropping to shell"
+exec /bin/sh"""
+
+        pre_init_block = ""
+        if pre_init_script:
+            pre_init_block = """
+# --- User pre-init script ---
+if [ -f /wairz_pre_init.sh ]; then
+    echo "[wairz] Running pre-init script..."
+    chmod +x /wairz_pre_init.sh
+    . /wairz_pre_init.sh
+    echo "[wairz] Pre-init script finished (exit=$?)"
+fi"""
+
+        return f"""#!/bin/sh
+# Wairz emulation init wrapper
+# Auto-configures the emulated environment before starting firmware init
+
+echo "[wairz] Init wrapper starting..."
+
+# Mount essential filesystems
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+[ -c /dev/null ] || mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /tmp /var/run 2>/dev/null
+mount -t tmpfs tmpfs /tmp 2>/dev/null
+mount -t tmpfs tmpfs /var/run 2>/dev/null
+
+# Configure networking (QEMU user-mode networking uses 10.0.2.0/24)
+# Wait briefly for NIC driver to initialize
+sleep 1
+if command -v ifconfig >/dev/null 2>&1; then
+    ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up 2>/dev/null
+    route add default gw 10.0.2.2 2>/dev/null
+elif command -v ip >/dev/null 2>&1; then
+    ip addr add 10.0.2.15/24 dev eth0 2>/dev/null
+    ip link set eth0 up 2>/dev/null
+    ip route add default via 10.0.2.2 2>/dev/null
+fi
+
+# Verify networking
+if command -v ifconfig >/dev/null 2>&1; then
+    echo "[wairz] Network: $(ifconfig eth0 2>/dev/null | grep 'inet ' || echo 'not configured')"
+fi
+{pre_init_block}
+
+echo "[wairz] Starting firmware init..."
+{exec_line}
+"""
+
+    @staticmethod
+    def _inject_init_wrapper(
+        container: "docker.models.containers.Container",
+        init_path: str | None = None,
+        pre_init_script: str | None = None,
+    ) -> str:
+        """Inject the wairz init wrapper into the firmware rootfs.
+
+        Writes /firmware/wairz_init.sh (and optionally /firmware/wairz_pre_init.sh)
+        into the container's firmware directory. These files will be included
+        in the ext4 rootfs image created by start-system-mode.sh.
+
+        Returns the init_path to pass to start-system-mode.sh ("/wairz_init.sh").
+        """
+        wrapper = EmulationService._generate_init_wrapper(init_path, pre_init_script)
+
+        # Write the wrapper script
+        container.exec_run([
+            "sh", "-c",
+            f"cat > /firmware/wairz_init.sh << 'WAIRZ_INIT_EOF'\n{wrapper}\nWAIRZ_INIT_EOF\n"
+            "chmod +x /firmware/wairz_init.sh"
+        ])
+
+        # Write the pre-init script if provided
+        if pre_init_script:
+            # Use base64 encoding to safely transfer script content
+            import base64
+            encoded = base64.b64encode(pre_init_script.encode()).decode()
+            container.exec_run([
+                "sh", "-c",
+                f"echo '{encoded}' | base64 -d > /firmware/wairz_pre_init.sh && "
+                "chmod +x /firmware/wairz_pre_init.sh"
+            ])
+            logger.info("Injected pre-init script (%d bytes)", len(pre_init_script))
+
+        logger.info(
+            "Injected init wrapper (original_init=%s, has_pre_init=%s)",
+            init_path or "auto-detect",
+            bool(pre_init_script),
+        )
+        return "/wairz_init.sh"
+
     async def _start_container(
         self,
         session: EmulationSession,
@@ -669,6 +834,7 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
         kernel_name: str | None = None,
         firmware_kernel_path: str | None = None,
         init_path: str | None = None,
+        pre_init_script: str | None = None,
     ) -> str:
         """Spawn a Docker container for this emulation session."""
         client = self._get_docker_client()
@@ -767,6 +933,14 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
             # Fix permissions — binwalk extraction may lose execute bits.
             self._fix_firmware_permissions(container)
 
+        # Inject LD_PRELOAD stub libraries into the firmware rootfs.
+        # These are pre-compiled .so files in /opt/stubs/ inside the emulation
+        # container, matched to the firmware's architecture. They're copied into
+        # /firmware/opt/stubs/ so they end up in the ext4 rootfs for system mode
+        # and in the chroot for user mode. Usage is via pre_init_script:
+        #   export LD_PRELOAD=/opt/stubs/fake_mtd.so
+        self._inject_stub_libraries(container, session.architecture)
+
         # For user mode, ensure binfmt_misc is registered for the target
         # architecture so child processes (spawned by the QEMU-emulated shell)
         # are automatically handled by the kernel via the cached qemu-static fd.
@@ -818,6 +992,16 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
                 initrd_arg = CONTAINER_INITRD_PATH
                 logger.info("Copied initrd to container: %s", initrd_backend_path)
 
+            # Inject init wrapper into the firmware rootfs. The wrapper
+            # auto-mounts proc/sysfs, configures networking, sources the
+            # optional pre-init script, then execs the original init.
+            # This must happen before ext4 image creation in start-system-mode.sh.
+            wrapper_init = self._inject_init_wrapper(
+                container,
+                init_path=init_path,
+                pre_init_script=pre_init_script,
+            )
+
             pf_str = ""
             if session.port_forwards:
                 pf_str = ",".join(
@@ -830,7 +1014,7 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
                 CONTAINER_KERNEL_PATH,
                 pf_str,
                 initrd_arg,
-                init_path or "",
+                wrapper_init,
             ]
             container.exec_run(cmd, detach=True)
 

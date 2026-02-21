@@ -97,7 +97,17 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "good for testing services and network behavior). "
             "For system mode, use list_available_kernels first to check that a "
             "matching kernel is available. You can specify kernel_name to select "
-            "a specific kernel. "
+            "a specific kernel.\n\n"
+            "SYSTEM MODE AUTO-SETUP: The emulator automatically mounts /proc, "
+            "/sys, /dev, /tmp and configures networking (eth0 10.0.2.15/24, "
+            "gateway 10.0.2.2) before starting the firmware init. You no longer "
+            "need to do this manually.\n\n"
+            "PRE-INIT SCRIPT: Use the pre_init_script parameter to run custom "
+            "setup before the firmware's init starts. This is ideal for:\n"
+            "- Setting LD_PRELOAD to inject stub libraries (e.g., fake MTD)\n"
+            "- Starting dependent services (e.g., cfmd before httpd)\n"
+            "- Creating config files or directories the firmware expects\n"
+            "- Setting environment variables for the firmware's init\n\n"
             "Use emulation to VALIDATE static findings: test if default credentials "
             "work, check if services are accessible, verify network behavior. "
             "Always stop sessions when done to free resources."
@@ -140,9 +150,26 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
                 "init_path": {
                     "type": "string",
                     "description": (
-                        "Override the init binary for system mode (added as init= kernel parameter). "
-                        "Use this when /sbin/init is broken, missing, or wrong architecture. "
-                        "Common values: '/bin/sh', '/bin/busybox sh', '/linuxrc'"
+                        "Override the init binary that runs AFTER the wairz init wrapper. "
+                        "The wrapper always runs first (mounts filesystems, configures network, "
+                        "runs pre_init_script), then execs this init. "
+                        "If omitted, auto-detects from /sbin/init, /etc/preinit, etc. "
+                        "Use '/bin/sh' for an interactive shell with all setup already done."
+                    ),
+                },
+                "pre_init_script": {
+                    "type": "string",
+                    "description": (
+                        "Shell script to run BEFORE the firmware's init starts but AFTER "
+                        "the wairz init wrapper has mounted filesystems and configured "
+                        "networking. The script runs inside the emulated system as PID 1's "
+                        "child. Use this for firmware-specific setup like:\n"
+                        "- export LD_PRELOAD=/path/to/fake_mtd.so\n"
+                        "- mkdir -p /cfg && cp /webroot/default.cfg /cfg/mib.cfg\n"
+                        "- /bin/cfmd &\n"
+                        "- sleep 1 && /bin/httpd &\n"
+                        "The script is sourced (not exec'd), so environment variables "
+                        "set here are inherited by the firmware's init."
                     ),
                 },
             },
@@ -366,6 +393,7 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
     port_forwards = input.get("port_forwards", [])
     kernel_name = input.get("kernel_name")
     init_path = input.get("init_path")
+    pre_init_script = input.get("pre_init_script")
 
     if mode == "user" and not binary_path:
         return "Error: binary_path is required for user-mode emulation."
@@ -396,6 +424,7 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
             port_forwards=port_forwards,
             kernel_name=kernel_name,
             init_path=init_path,
+            pre_init_script=pre_init_script,
         )
         await context.db.commit()
     except ValueError as exc:
@@ -417,6 +446,15 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
     if session.port_forwards:
         pf_strs = [f"{pf['host']}→{pf['guest']}" for pf in session.port_forwards]
         lines.append(f"  Port forwards: {', '.join(pf_strs)}")
+
+    if session.mode == "system":
+        lines.append("")
+        lines.append(
+            "Auto-setup: /proc, /sys, /dev, /tmp mounted; "
+            "networking configured (eth0 10.0.2.15/24, gw 10.0.2.2)."
+        )
+        if pre_init_script:
+            lines.append("Pre-init script: injected and will run before firmware init.")
 
     lines.append("")
     lines.append(
@@ -835,7 +873,49 @@ async def _handle_diagnose_environment(input: dict, context: ToolContext) -> str
             except OSError:
                 pass
 
-    # --- 8. Check architecture of key binaries ---
+    # --- 8. Check for MTD flash dependencies ---
+    # Scan key binaries for get_mtd_size/get_mtd_num string references.
+    # If found, the firmware likely needs the fake_mtd stub via LD_PRELOAD.
+    mtd_binaries: list[str] = []
+    mtd_scan_dirs = ["bin", "sbin", "usr/bin", "usr/sbin"]
+    for scan_dir in mtd_scan_dirs:
+        full_dir = os.path.join(fs_root, scan_dir)
+        if not os.path.isdir(full_dir):
+            continue
+        try:
+            for entry in os.scandir(full_dir):
+                if not entry.is_file() or entry.is_symlink():
+                    continue
+                try:
+                    size = entry.stat().st_size
+                    if size < 1000 or size > 50_000_000:
+                        continue
+                    with open(entry.path, "rb") as bf:
+                        data = bf.read(min(size, 2_000_000))
+                    if b"get_mtd_size" in data or b"get_mtd_num" in data:
+                        mtd_binaries.append(f"/{scan_dir}/{entry.name}")
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    if mtd_binaries:
+        issues.append(
+            f"MTD FLASH DEPENDENCY: {len(mtd_binaries)} binaries reference "
+            f"MTD flash functions (get_mtd_size/get_mtd_num) that will fail "
+            f"in QEMU (no MTD support):\n"
+            + "\n".join(f"    {b}" for b in mtd_binaries[:10])
+        )
+        suggestions.append(
+            "Use the fake MTD stub library via pre_init_script:\n"
+            "    export LD_PRELOAD=/opt/stubs/fake_mtd.so\n"
+            "This intercepts MTD functions (mtd_open, get_mtd_size, flash_read/write, "
+            "etc.) with file-backed storage and also stubs wireless ioctls (0x8B00-0x8BFF) "
+            "to prevent httpd InitConutryCode failures. The stub is automatically "
+            "injected into the firmware rootfs at /opt/stubs/fake_mtd.so."
+        )
+
+    # --- 9. Check architecture of key binaries ---
     try:
         from elftools.elf.elffile import ELFFile
         elf_arch_map = {
@@ -874,7 +954,7 @@ async def _handle_diagnose_environment(input: dict, context: ToolContext) -> str
     except ImportError:
         pass
 
-    # --- 9. Check shared library availability ---
+    # --- 10. Check shared library availability ---
     lib_dirs = ["lib", "usr/lib", "lib32"]
     total_libs = 0
     for ld in lib_dirs:
@@ -894,7 +974,7 @@ async def _handle_diagnose_environment(input: dict, context: ToolContext) -> str
             "Dynamically linked binaries will fail to run."
         )
 
-    # --- 10. Check kernel availability ---
+    # --- 11. Check kernel availability ---
     svc = KernelService()
     kernels = svc.list_kernels(architecture=arch)
     if kernels:
