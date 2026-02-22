@@ -296,6 +296,118 @@ async def _handle_get_component_map(input: dict, context: ToolContext) -> str:
     return "\n".join(lines)
 
 
+async def _handle_get_firmware_metadata(input: dict, context: ToolContext) -> str:
+    """Return firmware image metadata (partitions, U-Boot, MTD)."""
+    from app.models.firmware import Firmware
+    from app.services.firmware_metadata_service import FirmwareMetadataService
+
+    # Look up firmware to get storage_path
+    stmt = select(Firmware).where(Firmware.id == context.firmware_id)
+    result = await context.db.execute(stmt)
+    firmware = result.scalar_one_or_none()
+    if not firmware or not firmware.storage_path:
+        return "Error: firmware storage path not available."
+
+    service = FirmwareMetadataService()
+    metadata = await service.scan_firmware_image(
+        firmware.storage_path, context.firmware_id, context.db,
+    )
+
+    lines: list[str] = []
+    lines.append(f"Firmware Image Size: {metadata.file_size:,} bytes ({metadata.file_size / 1024 / 1024:.2f} MB)")
+    lines.append("")
+
+    # Sections table
+    if metadata.sections:
+        lines.append(f"Sections ({len(metadata.sections)}):")
+        lines.append(f"  {'Offset':<12} {'Size':<12} {'Type'}")
+        lines.append(f"  {'-' * 12} {'-' * 12} {'-' * 40}")
+        for s in metadata.sections:
+            offset_hex = f"0x{s.offset:08X}"
+            if s.size is not None:
+                if s.size >= 1024 * 1024:
+                    size_str = f"{s.size / 1024 / 1024:.1f} MB"
+                elif s.size >= 1024:
+                    size_str = f"{s.size / 1024:.1f} KB"
+                else:
+                    size_str = f"{s.size} B"
+            else:
+                size_str = "unknown"
+            lines.append(f"  {offset_hex:<12} {size_str:<12} {s.type}")
+        lines.append("")
+
+    # U-Boot header
+    if metadata.uboot_header:
+        h = metadata.uboot_header
+        lines.append("U-Boot uImage Header:")
+        lines.append(f"  Name:         {h.name}")
+        lines.append(f"  OS:           {h.os_type}")
+        lines.append(f"  Architecture: {h.architecture}")
+        lines.append(f"  Image Type:   {h.image_type}")
+        lines.append(f"  Compression:  {h.compression}")
+        lines.append(f"  Load Address: {h.load_address}")
+        lines.append(f"  Entry Point:  {h.entry_point}")
+        lines.append(f"  Data Size:    {h.data_size:,} bytes")
+        lines.append("")
+
+    # U-Boot environment
+    if metadata.uboot_env:
+        lines.append(f"U-Boot Environment ({len(metadata.uboot_env)} variables):")
+        for key, value in sorted(metadata.uboot_env.items()):
+            # Truncate long values
+            display_value = value if len(value) <= 120 else value[:117] + "..."
+            lines.append(f"  {key}={display_value}")
+        lines.append("")
+
+    # MTD partitions
+    if metadata.mtd_partitions:
+        lines.append(f"MTD Partitions ({len(metadata.mtd_partitions)}):")
+        lines.append(f"  {'Name':<20} {'Offset':<12} {'Size'}")
+        lines.append(f"  {'-' * 20} {'-' * 12} {'-' * 12}")
+        for p in metadata.mtd_partitions:
+            offset_str = f"0x{p.offset:08X}" if p.offset is not None else "auto"
+            if p.size == 0:
+                size_str = "(rest)"
+            elif p.size >= 1024 * 1024:
+                size_str = f"{p.size / 1024 / 1024:.1f} MB"
+            elif p.size >= 1024:
+                size_str = f"{p.size / 1024:.1f} KB"
+            else:
+                size_str = f"{p.size} B"
+            lines.append(f"  {p.name:<20} {offset_str:<12} {size_str}")
+        lines.append("")
+
+    if not metadata.sections and not metadata.uboot_header and not metadata.mtd_partitions:
+        lines.append("No structural metadata found in firmware image.")
+
+    return "\n".join(lines)
+
+
+async def _handle_extract_bootloader_env(input: dict, context: ToolContext) -> str:
+    """Return just the U-Boot environment variables."""
+    from app.models.firmware import Firmware
+    from app.services.firmware_metadata_service import FirmwareMetadataService
+
+    stmt = select(Firmware).where(Firmware.id == context.firmware_id)
+    result = await context.db.execute(stmt)
+    firmware = result.scalar_one_or_none()
+    if not firmware or not firmware.storage_path:
+        return "Error: firmware storage path not available."
+
+    service = FirmwareMetadataService()
+    metadata = await service.scan_firmware_image(
+        firmware.storage_path, context.firmware_id, context.db,
+    )
+
+    if not metadata.uboot_env:
+        return "No U-Boot environment variables found in firmware image."
+
+    lines = [f"U-Boot Environment ({len(metadata.uboot_env)} variables):", ""]
+    for key, value in sorted(metadata.uboot_env.items()):
+        lines.append(f"{key}={value}")
+    return "\n".join(lines)
+
+
 def register_filesystem_tools(registry: ToolRegistry) -> None:
     """Register all filesystem tools with the given registry."""
 
@@ -429,4 +541,37 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
             "required": [],
         },
         handler=_handle_get_component_map,
+    )
+
+    registry.register(
+        name="get_firmware_metadata",
+        description=(
+            "Get structural metadata from the raw firmware image. "
+            "Returns: partition/section map (offsets, sizes, types from binwalk scan), "
+            "U-Boot uImage header (OS, arch, compression, load/entry addresses), "
+            "U-Boot environment variables (bootcmd, bootargs, mtdparts, etc.), "
+            "and MTD partition table if present. "
+            "Use this to understand the firmware image layout before diving into files."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        handler=_handle_get_firmware_metadata,
+    )
+
+    registry.register(
+        name="extract_bootloader_env",
+        description=(
+            "Extract U-Boot bootloader environment variables from the firmware image. "
+            "Returns key=value pairs like bootcmd, bootargs, ethaddr, mtdparts, etc. "
+            "Quick way to check boot configuration without scanning the full image."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        handler=_handle_extract_bootloader_env,
     )

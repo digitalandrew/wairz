@@ -11,6 +11,7 @@ import {
   Package,
   PlayCircle,
   Bug,
+  GitCompareArrows,
   HelpCircle,
 } from 'lucide-react'
 import { Separator } from '@/components/ui/separator'
@@ -31,6 +32,7 @@ const projectSubPages = [
   { suffix: '/sbom', label: 'SBOM', icon: Package },
   { suffix: '/emulation', label: 'Emulation (experimental)', icon: PlayCircle },
   { suffix: '/fuzzing', label: 'Fuzzing', icon: Bug },
+  { suffix: '/compare', label: 'Compare', icon: GitCompareArrows },
 ]
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {

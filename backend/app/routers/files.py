@@ -13,13 +13,19 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}/files", tags=["files"])
 
 async def get_file_service(
     project_id: uuid.UUID,
+    firmware_id: uuid.UUID | None = Query(None, description="Specific firmware ID (defaults to first)"),
     db: AsyncSession = Depends(get_db),
 ) -> FileService:
     """Resolve project → firmware → extracted_path, return a FileService."""
     firmware_svc = FirmwareService(db)
-    firmware = await firmware_svc.get_by_project(project_id)
-    if not firmware:
-        raise HTTPException(404, "No firmware uploaded for this project")
+    if firmware_id:
+        firmware = await firmware_svc.get_by_id(firmware_id)
+        if not firmware or firmware.project_id != project_id:
+            raise HTTPException(404, "Firmware not found")
+    else:
+        firmware = await firmware_svc.get_by_project(project_id)
+        if not firmware:
+            raise HTTPException(404, "No firmware uploaded for this project")
     if not firmware.extracted_path:
         raise HTTPException(400, "Firmware not yet unpacked")
     return FileService(firmware.extracted_path)

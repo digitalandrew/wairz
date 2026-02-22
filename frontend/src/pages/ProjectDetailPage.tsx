@@ -11,15 +11,19 @@ import {
   FileText,
   Loader2,
   AlertCircle,
+  GitCompareArrows,
+  Plus,
+  Tag,
 } from 'lucide-react'
 import { useProjectStore } from '@/stores/projectStore'
-import { getFirmware } from '@/api/firmware'
+import { listFirmware, deleteFirmware } from '@/api/firmware'
 import type { FirmwareDetail } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatFileSize, formatDate } from '@/utils/format'
 import FirmwareUpload from '@/components/projects/FirmwareUpload'
+import FirmwareMetadataCard from '@/components/projects/FirmwareMetadataCard'
 import DocumentsCard from '@/components/projects/DocumentsCard'
 import McpConnectionCard from '@/components/projects/McpConnectionCard'
 
@@ -43,19 +47,20 @@ export default function ProjectDetailPage() {
     clearCurrentProject,
   } = useProjectStore()
 
-  const [firmwareDetail, setFirmwareDetail] = useState<FirmwareDetail | null>(null)
+  const [firmwareList, setFirmwareList] = useState<FirmwareDetail[]>([])
+  const [showUpload, setShowUpload] = useState(false)
 
   useEffect(() => {
     if (projectId) fetchProject(projectId)
     return () => clearCurrentProject()
   }, [projectId, fetchProject, clearCurrentProject])
 
-  // Fetch full firmware detail (includes unpack_log) when project is in error state
+  // Fetch full firmware list for details (includes unpack_log, extracted_path)
   useEffect(() => {
-    if (project?.status === 'error' && projectId) {
-      getFirmware(projectId).then(setFirmwareDetail).catch(() => {})
+    if (projectId && project) {
+      listFirmware(projectId).then(setFirmwareList).catch(() => {})
     }
-  }, [project?.status, projectId])
+  }, [project, projectId])
 
   if (loading || !project) {
     return (
@@ -66,8 +71,10 @@ export default function ProjectDetailPage() {
     )
   }
 
-  const firmware = project.firmware?.[0] ?? null
+  const firmware = project.firmware ?? []
   const status = project.status
+  const hasUnpacked = firmwareList.some((fw) => fw.extracted_path)
+  const unpackedCount = firmwareList.filter((fw) => fw.extracted_path).length
 
   const handleDelete = async () => {
     if (window.confirm('Delete this project and all its data? This cannot be undone.')) {
@@ -76,13 +83,35 @@ export default function ProjectDetailPage() {
     }
   }
 
-  const handleUnpack = async () => {
+  const handleUnpack = async (firmwareId: string) => {
     if (projectId) {
       try {
-        await unpackFirmware(projectId)
+        await unpackFirmware(projectId, firmwareId)
+        // Refresh firmware list
+        listFirmware(projectId).then(setFirmwareList).catch(() => {})
       } catch {
         // error shown via store
       }
+    }
+  }
+
+  const handleDeleteFirmware = async (firmwareId: string) => {
+    if (!projectId) return
+    if (!window.confirm('Delete this firmware version? This cannot be undone.')) return
+    try {
+      await deleteFirmware(projectId, firmwareId)
+      fetchProject(projectId)
+      listFirmware(projectId).then(setFirmwareList).catch(() => {})
+    } catch {
+      // error handled by caller
+    }
+  }
+
+  const handleUploadComplete = () => {
+    setShowUpload(false)
+    if (projectId) {
+      fetchProject(projectId)
+      listFirmware(projectId).then(setFirmwareList).catch(() => {})
     }
   }
 
@@ -119,78 +148,141 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
-      {/* Firmware info */}
-      {firmware && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Firmware</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-              <div className="flex items-center gap-2">
-                <FileText className="h-4 w-4 text-muted-foreground" />
-                <dt className="text-muted-foreground">File:</dt>
-                <dd className="font-medium truncate">{firmware.original_filename}</dd>
-              </div>
-              <div className="flex items-center gap-2">
-                <HardDrive className="h-4 w-4 text-muted-foreground" />
-                <dt className="text-muted-foreground">Size:</dt>
-                <dd className="font-medium">
-                  {firmware.file_size != null ? formatFileSize(firmware.file_size) : 'N/A'}
-                </dd>
-              </div>
-              {firmware.architecture && (
-                <div className="flex items-center gap-2">
-                  <Cpu className="h-4 w-4 text-muted-foreground" />
-                  <dt className="text-muted-foreground">Architecture:</dt>
-                  <dd className="font-medium">
-                    {firmware.architecture}
-                    {firmware.endianness ? ` (${firmware.endianness})` : ''}
-                  </dd>
-                </div>
-              )}
-              <div className="flex items-center gap-2">
-                <Hash className="h-4 w-4 text-muted-foreground" />
-                <dt className="text-muted-foreground">SHA256:</dt>
-                <dd className="font-mono text-xs truncate">{firmware.sha256}</dd>
-              </div>
-            </dl>
-          </CardContent>
-        </Card>
+      {/* Firmware cards */}
+      {firmware.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+              Firmware ({firmware.length})
+            </h2>
+            <Button size="sm" variant="outline" onClick={() => setShowUpload(!showUpload)}>
+              <Plus className="mr-1 h-3.5 w-3.5" />
+              Upload Version
+            </Button>
+          </div>
+
+          {firmware.map((fw) => {
+            const fwDetail = firmwareList.find((f) => f.id === fw.id)
+            const isUnpacked = fwDetail?.extracted_path
+            const hasError = fwDetail?.unpack_log && !isUnpacked && status === 'error'
+
+            return (
+              <Card key={fw.id}>
+                <CardHeader className="pb-3">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <FileText className="h-4 w-4" />
+                      {fw.original_filename}
+                      {fw.version_label && (
+                        <Badge variant="secondary" className="text-xs">
+                          <Tag className="mr-1 h-3 w-3" />
+                          {fw.version_label}
+                        </Badge>
+                      )}
+                      {isUnpacked && (
+                        <Badge variant="default" className="text-xs">unpacked</Badge>
+                      )}
+                    </CardTitle>
+                    <div className="flex gap-1">
+                      {!isUnpacked && !hasError && (
+                        <Button size="sm" onClick={() => handleUnpack(fw.id)} disabled={unpacking}>
+                          {unpacking && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+                          Unpack
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => handleDeleteFirmware(fw.id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+                    <div className="flex items-center gap-2">
+                      <HardDrive className="h-4 w-4 text-muted-foreground" />
+                      <dt className="text-muted-foreground">Size:</dt>
+                      <dd className="font-medium">
+                        {fw.file_size != null ? formatFileSize(fw.file_size) : 'N/A'}
+                      </dd>
+                    </div>
+                    {fw.architecture && (
+                      <div className="flex items-center gap-2">
+                        <Cpu className="h-4 w-4 text-muted-foreground" />
+                        <dt className="text-muted-foreground">Architecture:</dt>
+                        <dd className="font-medium">
+                          {fw.architecture}
+                          {fw.endianness ? ` (${fw.endianness})` : ''}
+                        </dd>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2 col-span-2">
+                      <Hash className="h-4 w-4 text-muted-foreground" />
+                      <dt className="text-muted-foreground">SHA256:</dt>
+                      <dd className="font-mono text-xs truncate">{fw.sha256}</dd>
+                    </div>
+                  </dl>
+
+                  {hasError && fwDetail?.unpack_log && (
+                    <div className="mt-3 rounded bg-destructive/5 border border-destructive/20 p-3">
+                      <div className="flex items-center gap-2 text-sm text-destructive mb-2">
+                        <AlertCircle className="h-4 w-4" />
+                        Unpacking Failed
+                      </div>
+                      <pre className="max-h-40 overflow-auto text-xs">{fwDetail.unpack_log}</pre>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-2"
+                        onClick={() => handleUnpack(fw.id)}
+                        disabled={unpacking}
+                      >
+                        {unpacking && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+                        Retry
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )
+          })}
+        </div>
       )}
 
-      {/* Project documents — always visible */}
-      <DocumentsCard projectId={project.id} />
-
-      {/* Action section based on status */}
-      {status === 'created' && !firmware && (
+      {/* Upload section */}
+      {(showUpload || (status === 'created' && firmware.length === 0)) && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Upload Firmware</CardTitle>
           </CardHeader>
           <CardContent>
-            <FirmwareUpload projectId={project.id} onComplete={() => fetchProject(project.id)} />
+            <FirmwareUpload
+              projectId={project.id}
+              onComplete={handleUploadComplete}
+              showVersionLabel={firmware.length > 0}
+            />
           </CardContent>
         </Card>
       )}
 
-      {status === 'created' && firmware && (
-        <Card>
-          <CardContent className="flex items-center justify-between pt-6">
-            <p className="text-sm text-muted-foreground">
-              Firmware uploaded. Ready to unpack and analyze.
-            </p>
-            <Button size="sm" onClick={handleUnpack} disabled={unpacking}>
-              {unpacking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Unpack Firmware
-            </Button>
-          </CardContent>
-        </Card>
-      )}
+      {/* Project documents */}
+      <DocumentsCard projectId={project.id} />
 
-      {status === 'ready' && (
+      {/* Firmware metadata cards for unpacked firmware */}
+      {firmwareList
+        .filter((fw) => fw.extracted_path)
+        .map((fw) => (
+          <FirmwareMetadataCard key={fw.id} projectId={project.id} firmwareId={fw.id} />
+        ))}
+
+      {/* Action buttons when ready */}
+      {hasUnpacked && (
         <>
-          <div className="flex gap-3">
+          <div className="flex gap-3 flex-wrap">
             <Button asChild>
               <Link to={`/projects/${project.id}/explore`}>
                 <FolderSearch className="mr-2 h-4 w-4" />
@@ -203,32 +295,18 @@ export default function ProjectDetailPage() {
                 Findings
               </Link>
             </Button>
+            {unpackedCount >= 2 && (
+              <Button variant="outline" asChild>
+                <Link to={`/projects/${project.id}/compare`}>
+                  <GitCompareArrows className="mr-2 h-4 w-4" />
+                  Compare Versions
+                </Link>
+              </Button>
+            )}
           </div>
 
           <McpConnectionCard projectId={project.id} />
         </>
-      )}
-
-      {status === 'error' && (
-        <Card className="border-destructive/50">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base text-destructive">
-              <AlertCircle className="h-4 w-4" />
-              Unpacking Failed
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {firmwareDetail?.unpack_log && (
-              <pre className="max-h-60 overflow-auto rounded bg-muted p-3 text-xs">
-                {firmwareDetail.unpack_log}
-              </pre>
-            )}
-            <Button size="sm" variant="outline" onClick={handleUnpack} disabled={unpacking}>
-              {unpacking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Retry Unpack
-            </Button>
-          </CardContent>
-        </Card>
       )}
     </div>
   )

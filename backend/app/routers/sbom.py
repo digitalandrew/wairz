@@ -31,13 +31,19 @@ router = APIRouter(
 
 async def _resolve_firmware(
     project_id: uuid.UUID,
+    firmware_id: uuid.UUID | None = Query(None, description="Specific firmware ID (defaults to first)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Resolve project -> firmware, return firmware record."""
     svc = FirmwareService(db)
-    firmware = await svc.get_by_project(project_id)
-    if not firmware:
-        raise HTTPException(404, "No firmware uploaded for this project")
+    if firmware_id:
+        firmware = await svc.get_by_id(firmware_id)
+        if not firmware or firmware.project_id != project_id:
+            raise HTTPException(404, "Firmware not found")
+    else:
+        firmware = await svc.get_by_project(project_id)
+        if not firmware:
+            raise HTTPException(404, "No firmware uploaded for this project")
     if not firmware.extracted_path:
         raise HTTPException(400, "Firmware not yet unpacked")
     return firmware

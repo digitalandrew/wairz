@@ -1,40 +1,58 @@
 import { useCallback, useRef, useState } from 'react'
 import { Upload, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
 import { useProjectStore } from '@/stores/projectStore'
+import { uploadFirmware as apiUploadFirmware, unpackFirmware as apiUnpackFirmware } from '@/api/firmware'
+import { getProject } from '@/api/projects'
 import { Progress } from '@/components/ui/progress'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 
 type Phase = 'idle' | 'uploading' | 'unpacking' | 'done' | 'error'
 
 interface FirmwareUploadProps {
   projectId: string
   onComplete?: () => void
+  showVersionLabel?: boolean
 }
 
-export default function FirmwareUpload({ projectId, onComplete }: FirmwareUploadProps) {
+export default function FirmwareUpload({ projectId, onComplete, showVersionLabel }: FirmwareUploadProps) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [errorMsg, setErrorMsg] = useState('')
   const [dragActive, setDragActive] = useState(false)
+  const [versionLabel, setVersionLabel] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const { uploadFirmware, unpackFirmware, uploadProgress } = useProjectStore()
+  const { uploadProgress } = useProjectStore()
+  const setStore = useProjectStore.setState
 
   const handleFile = useCallback(
     async (file: File) => {
       setPhase('uploading')
       setErrorMsg('')
       try {
-        await uploadFirmware(projectId, file)
+        setStore({ uploading: true, uploadProgress: 0 })
+        const fw = await apiUploadFirmware(
+          projectId,
+          file,
+          versionLabel || undefined,
+          (pct) => setStore({ uploadProgress: pct }),
+        )
+        setStore({ uploading: false, uploadProgress: 100 })
         setPhase('unpacking')
-        await unpackFirmware(projectId)
+        await apiUnpackFirmware(projectId, fw.id)
+        // Refresh project
+        const project = await getProject(projectId)
+        setStore({ currentProject: project })
         setPhase('done')
         onComplete?.()
       } catch (e) {
+        setStore({ uploading: false })
         setErrorMsg(e instanceof Error ? e.message : 'Upload failed')
         setPhase('error')
       }
     },
-    [projectId, uploadFirmware, unpackFirmware, onComplete],
+    [projectId, versionLabel, onComplete, setStore],
   )
 
   const onDrop = useCallback(
@@ -103,26 +121,40 @@ export default function FirmwareUpload({ projectId, onComplete }: FirmwareUpload
   }
 
   return (
-    <div
-      className={`flex cursor-pointer flex-col items-center gap-3 rounded-lg border-2 border-dashed p-8 transition-colors ${
-        dragActive ? 'border-primary bg-primary/5' : 'border-muted-foreground/25 hover:border-muted-foreground/50'
-      }`}
-      onDragOver={(e) => {
-        e.preventDefault()
-        setDragActive(true)
-      }}
-      onDragLeave={() => setDragActive(false)}
-      onDrop={onDrop}
-      onClick={() => inputRef.current?.click()}
-    >
-      <Upload className="h-8 w-8 text-muted-foreground" />
-      <div className="text-center">
-        <p className="text-sm font-medium">Drop firmware file here or click to browse</p>
-        <p className="text-xs text-muted-foreground mt-1">
-          Supports .bin, .img, .hex, .chk, .trx, and other firmware formats
-        </p>
+    <div className="space-y-3">
+      {showVersionLabel && (
+        <div className="space-y-1">
+          <Label htmlFor="version-label" className="text-xs">Version Label (optional)</Label>
+          <Input
+            id="version-label"
+            placeholder="e.g. v1.0, v1.1-patched"
+            value={versionLabel}
+            onChange={(e) => setVersionLabel(e.target.value)}
+            className="h-8 text-sm"
+          />
+        </div>
+      )}
+      <div
+        className={`flex cursor-pointer flex-col items-center gap-3 rounded-lg border-2 border-dashed p-8 transition-colors ${
+          dragActive ? 'border-primary bg-primary/5' : 'border-muted-foreground/25 hover:border-muted-foreground/50'
+        }`}
+        onDragOver={(e) => {
+          e.preventDefault()
+          setDragActive(true)
+        }}
+        onDragLeave={() => setDragActive(false)}
+        onDrop={onDrop}
+        onClick={() => inputRef.current?.click()}
+      >
+        <Upload className="h-8 w-8 text-muted-foreground" />
+        <div className="text-center">
+          <p className="text-sm font-medium">Drop firmware file here or click to browse</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Supports .bin, .img, .hex, .chk, .trx, and other firmware formats
+          </p>
+        </div>
+        <input ref={inputRef} type="file" className="hidden" onChange={onInputChange} />
       </div>
-      <input ref={inputRef} type="file" className="hidden" onChange={onInputChange} />
     </div>
   )
 }

@@ -19,8 +19,8 @@ interface ProjectActions {
   fetchProject: (id: string) => Promise<void>
   createProject: (name: string, description?: string) => Promise<ProjectDetail>
   removeProject: (id: string) => Promise<void>
-  uploadFirmware: (projectId: string, file: File) => Promise<void>
-  unpackFirmware: (projectId: string) => Promise<void>
+  uploadFirmware: (projectId: string, file: File, versionLabel?: string) => Promise<void>
+  unpackFirmware: (projectId: string, firmwareId: string) => Promise<void>
   clearError: () => void
   clearCurrentProject: () => void
 }
@@ -79,10 +79,10 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
     }
   },
 
-  uploadFirmware: async (projectId, file) => {
+  uploadFirmware: async (projectId, file, versionLabel) => {
     set({ uploading: true, uploadProgress: 0, error: null })
     try {
-      await apiFirmwareUpload(projectId, file, (pct) => set({ uploadProgress: pct }))
+      await apiFirmwareUpload(projectId, file, versionLabel, (pct) => set({ uploadProgress: pct }))
       // Refresh project to get firmware info
       const project = await getProject(projectId)
       set({ uploading: false, uploadProgress: 100, currentProject: project })
@@ -94,10 +94,10 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
     }
   },
 
-  unpackFirmware: async (projectId) => {
+  unpackFirmware: async (projectId, firmwareId) => {
     set({ unpacking: true, error: null })
     try {
-      await apiUnpackFirmware(projectId)
+      await apiUnpackFirmware(projectId, firmwareId)
       const project = await getProject(projectId)
       set({ unpacking: false, currentProject: project })
       syncProjectInList(set, get, project)

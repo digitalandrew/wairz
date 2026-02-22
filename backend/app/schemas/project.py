@@ -24,6 +24,7 @@ class FirmwareResponse(BaseModel):
     architecture: str | None
     endianness: str | None
     os_info: str | None
+    version_label: str | None = None
     created_at: datetime
 
 

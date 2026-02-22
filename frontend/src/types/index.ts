@@ -20,6 +20,7 @@ export interface FirmwareSummary {
   endianness: string | null
   os_info: string | null
   kernel_path: string | null
+  version_label: string | null
   created_at: string
 }
 
@@ -27,6 +28,7 @@ export interface FirmwareDetail extends FirmwareSummary {
   project_id: string
   storage_path: string | null
   extracted_path: string | null
+  version_label: string | null
   unpack_log: string | null
 }
 
@@ -460,4 +462,79 @@ export interface ComponentGraph {
   node_count: number
   edge_count: number
   truncated: boolean
+}
+
+// ── Firmware Metadata types ──
+
+export interface FirmwareSection {
+  offset: number
+  size: number | null
+  type: string
+  description: string
+}
+
+export interface UBootHeader {
+  magic: string
+  header_crc: string
+  timestamp: number
+  data_size: number
+  load_address: string
+  entry_point: string
+  data_crc: string
+  os_type: string
+  architecture: string
+  image_type: string
+  compression: string
+  name: string
+}
+
+export interface MTDPartition {
+  name: string
+  offset: number | null
+  size: number
+}
+
+export interface FirmwareMetadata {
+  file_size: number
+  sections: FirmwareSection[]
+  uboot_header: UBootHeader | null
+  uboot_env: Record<string, string>
+  mtd_partitions: MTDPartition[]
+}
+
+// ── Firmware Comparison types ──
+
+export interface FileDiffEntry {
+  path: string
+  status: 'added' | 'removed' | 'modified' | 'permissions_changed'
+  size_a: number | null
+  size_b: number | null
+  perms_a: string | null
+  perms_b: string | null
+}
+
+export interface FirmwareDiff {
+  added: FileDiffEntry[]
+  removed: FileDiffEntry[]
+  modified: FileDiffEntry[]
+  permissions_changed: FileDiffEntry[]
+  total_files_a: number
+  total_files_b: number
+  truncated: boolean
+}
+
+export interface FunctionDiffEntry {
+  name: string
+  status: 'added' | 'removed' | 'modified'
+  size_a: number | null
+  size_b: number | null
+}
+
+export interface BinaryDiff {
+  binary_path: string
+  functions_added: FunctionDiffEntry[]
+  functions_removed: FunctionDiffEntry[]
+  functions_modified: FunctionDiffEntry[]
+  info_a: Record<string, unknown>
+  info_b: Record<string, unknown>
 }
