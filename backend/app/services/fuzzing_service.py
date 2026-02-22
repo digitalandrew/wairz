@@ -319,10 +319,13 @@ class FuzzingService:
 
         return campaign
 
-    async def start_campaign(self, campaign_id: UUID) -> FuzzingCampaign:
+    async def start_campaign(self, campaign_id: UUID, project_id: UUID) -> FuzzingCampaign:
         """Start a fuzzing campaign by spawning an AFL++ container."""
         result = await self.db.execute(
-            select(FuzzingCampaign).where(FuzzingCampaign.id == campaign_id)
+            select(FuzzingCampaign).where(
+                FuzzingCampaign.id == campaign_id,
+                FuzzingCampaign.project_id == project_id,
+            )
         )
         campaign = result.scalar_one_or_none()
         if not campaign:
@@ -456,11 +459,12 @@ class FuzzingService:
         await self.db.flush()
         return campaign
 
-    async def stop_campaign(self, campaign_id: UUID) -> FuzzingCampaign:
+    async def stop_campaign(self, campaign_id: UUID, project_id: UUID | None = None) -> FuzzingCampaign:
         """Stop a fuzzing campaign and clean up its container."""
-        result = await self.db.execute(
-            select(FuzzingCampaign).where(FuzzingCampaign.id == campaign_id)
-        )
+        query = select(FuzzingCampaign).where(FuzzingCampaign.id == campaign_id)
+        if project_id is not None:
+            query = query.where(FuzzingCampaign.project_id == project_id)
+        result = await self.db.execute(query)
         campaign = result.scalar_one_or_none()
         if not campaign:
             raise ValueError("Campaign not found")
@@ -491,11 +495,12 @@ class FuzzingService:
         await self.db.flush()
         return campaign
 
-    async def get_campaign_status(self, campaign_id: UUID) -> FuzzingCampaign:
+    async def get_campaign_status(self, campaign_id: UUID, project_id: UUID | None = None) -> FuzzingCampaign:
         """Get live status of a fuzzing campaign, updating stats from container."""
-        result = await self.db.execute(
-            select(FuzzingCampaign).where(FuzzingCampaign.id == campaign_id)
-        )
+        query = select(FuzzingCampaign).where(FuzzingCampaign.id == campaign_id)
+        if project_id is not None:
+            query = query.where(FuzzingCampaign.project_id == project_id)
+        result = await self.db.execute(query)
         campaign = result.scalar_one_or_none()
         if not campaign:
             raise ValueError("Campaign not found")
@@ -634,7 +639,7 @@ class FuzzingService:
         return new_crashes
 
     async def triage_crash(
-        self, campaign_id: UUID, crash_id: UUID
+        self, campaign_id: UUID, crash_id: UUID, project_id: UUID
     ) -> FuzzingCrash:
         """Reproduce a crash under QEMU user mode and classify exploitability.
 
@@ -646,9 +651,12 @@ class FuzzingService:
              stack trace (best-effort).
         """
         result = await self.db.execute(
-            select(FuzzingCrash).where(
+            select(FuzzingCrash)
+            .join(FuzzingCampaign, FuzzingCrash.campaign_id == FuzzingCampaign.id)
+            .where(
                 FuzzingCrash.id == crash_id,
                 FuzzingCrash.campaign_id == campaign_id,
+                FuzzingCampaign.project_id == project_id,
             )
         )
         crash = result.scalar_one_or_none()
@@ -802,23 +810,30 @@ class FuzzingService:
         )
         return list(result.scalars().all())
 
-    async def get_crashes(self, campaign_id: UUID) -> list[FuzzingCrash]:
-        """List all crashes for a campaign."""
+    async def get_crashes(self, campaign_id: UUID, project_id: UUID) -> list[FuzzingCrash]:
+        """List all crashes for a campaign, verifying project ownership."""
         result = await self.db.execute(
             select(FuzzingCrash)
-            .where(FuzzingCrash.campaign_id == campaign_id)
+            .join(FuzzingCampaign, FuzzingCrash.campaign_id == FuzzingCampaign.id)
+            .where(
+                FuzzingCrash.campaign_id == campaign_id,
+                FuzzingCampaign.project_id == project_id,
+            )
             .order_by(FuzzingCrash.created_at.desc())
         )
         return list(result.scalars().all())
 
     async def get_crash_detail(
-        self, campaign_id: UUID, crash_id: UUID
+        self, campaign_id: UUID, crash_id: UUID, project_id: UUID
     ) -> FuzzingCrash:
-        """Get a single crash with full details."""
+        """Get a single crash with full details, verifying project ownership."""
         result = await self.db.execute(
-            select(FuzzingCrash).where(
+            select(FuzzingCrash)
+            .join(FuzzingCampaign, FuzzingCrash.campaign_id == FuzzingCampaign.id)
+            .where(
                 FuzzingCrash.id == crash_id,
                 FuzzingCrash.campaign_id == campaign_id,
+                FuzzingCampaign.project_id == project_id,
             )
         )
         crash = result.scalar_one_or_none()

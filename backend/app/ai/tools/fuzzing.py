@@ -419,7 +419,7 @@ async def _handle_start_campaign(input: dict, context: ToolContext) -> str:
     svc = FuzzingService(context.db)
     try:
         campaign = await svc.create_campaign(firmware, binary_path, config)
-        campaign = await svc.start_campaign(campaign.id)
+        campaign = await svc.start_campaign(campaign.id, context.project_id)
         await context.db.commit()
     except ValueError as exc:
         return f"Error: {exc}"
@@ -457,7 +457,7 @@ async def _handle_check_status(input: dict, context: ToolContext) -> str:
     if campaign_id:
         from uuid import UUID
         try:
-            campaign = await svc.get_campaign_status(UUID(campaign_id))
+            campaign = await svc.get_campaign_status(UUID(campaign_id), context.project_id)
         except ValueError as exc:
             return f"Error: {exc}"
 
@@ -478,7 +478,7 @@ async def _handle_check_status(input: dict, context: ToolContext) -> str:
             lines.append(f"  Coverage: {stats.get('bitmap_cvg', 'N/A')}")
 
         if campaign.crashes_count > 0:
-            crashes = await svc.get_crashes(UUID(campaign_id))
+            crashes = await svc.get_crashes(UUID(campaign_id), context.project_id)
             lines.append(f"\n  Crashes ({len(crashes)}):")
             for c in crashes[:10]:
                 expl = f" [{c.exploitability}]" if c.exploitability else ""
@@ -520,7 +520,7 @@ async def _handle_stop_campaign(input: dict, context: ToolContext) -> str:
     svc = FuzzingService(context.db)
     try:
         from uuid import UUID
-        campaign = await svc.stop_campaign(UUID(campaign_id))
+        campaign = await svc.stop_campaign(UUID(campaign_id), context.project_id)
         await context.db.commit()
     except ValueError as exc:
         return f"Error: {exc}"
@@ -544,7 +544,7 @@ async def _handle_triage_crash(input: dict, context: ToolContext) -> str:
     svc = FuzzingService(context.db)
     try:
         from uuid import UUID
-        crash = await svc.triage_crash(UUID(campaign_id), UUID(crash_id))
+        crash = await svc.triage_crash(UUID(campaign_id), UUID(crash_id), context.project_id)
         await context.db.commit()
     except ValueError as exc:
         return f"Error: {exc}"

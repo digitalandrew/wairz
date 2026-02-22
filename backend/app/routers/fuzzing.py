@@ -88,7 +88,7 @@ async def start_campaign(
     """Start a fuzzing campaign."""
     svc = FuzzingService(db)
     try:
-        campaign = await svc.start_campaign(campaign_id)
+        campaign = await svc.start_campaign(campaign_id, project_id)
         await db.commit()
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -104,7 +104,7 @@ async def stop_campaign(
     """Stop a running fuzzing campaign."""
     svc = FuzzingService(db)
     try:
-        campaign = await svc.stop_campaign(campaign_id)
+        campaign = await svc.stop_campaign(campaign_id, project_id)
         await db.commit()
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -138,7 +138,7 @@ async def get_campaign(
     """Get campaign details with live stats."""
     svc = FuzzingService(db)
     try:
-        campaign = await svc.get_campaign_status(campaign_id)
+        campaign = await svc.get_campaign_status(campaign_id, project_id)
         await db.commit()
     except ValueError as exc:
         raise HTTPException(404, str(exc))
@@ -153,7 +153,7 @@ async def list_crashes(
 ):
     """List all crashes for a campaign."""
     svc = FuzzingService(db)
-    crashes = await svc.get_crashes(campaign_id)
+    crashes = await svc.get_crashes(campaign_id, project_id)
     return crashes
 
 
@@ -170,7 +170,7 @@ async def get_crash_detail(
     """Get detailed crash information including hex-encoded input."""
     svc = FuzzingService(db)
     try:
-        crash = await svc.get_crash_detail(campaign_id, crash_id)
+        crash = await svc.get_crash_detail(campaign_id, crash_id, project_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
 
@@ -194,7 +194,7 @@ async def triage_crash(
     """Triage a crash: reproduce with GDB and classify exploitability."""
     svc = FuzzingService(db)
     try:
-        crash = await svc.triage_crash(campaign_id, crash_id)
+        crash = await svc.triage_crash(campaign_id, crash_id, project_id)
         await db.commit()
     except ValueError as exc:
         raise HTTPException(400, str(exc))
