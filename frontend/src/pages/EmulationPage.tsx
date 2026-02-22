@@ -33,7 +33,7 @@ import {
   createPreset,
   deletePreset,
 } from '@/api/emulation'
-import { getFirmware } from '@/api/firmware'
+import { listFirmware } from '@/api/firmware'
 import KernelManager from '@/components/emulation/KernelManager'
 import type {
   EmulationSession,
@@ -132,10 +132,13 @@ export default function EmulationPage() {
   // Fetch firmware architecture for kernel selection
   useEffect(() => {
     if (!projectId) return
-    getFirmware(projectId)
-      .then((fw) => {
-        setFirmwareArch(fw.architecture ?? null)
-        setFirmwareKernelPath(fw.kernel_path ?? null)
+    listFirmware(projectId)
+      .then((fwList) => {
+        const fw = fwList[0]
+        if (fw) {
+          setFirmwareArch(fw.architecture ?? null)
+          setFirmwareKernelPath(fw.kernel_path ?? null)
+        }
       })
       .catch(() => {})
   }, [projectId])
