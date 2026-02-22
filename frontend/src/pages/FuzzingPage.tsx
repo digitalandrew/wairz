@@ -28,13 +28,16 @@ import {
   getCampaign,
   listCrashes,
   triageCrash,
+  getCrashDetail,
 } from '@/api/fuzzing'
+import { createFinding } from '@/api/findings'
 import type {
   FuzzingCampaign,
   FuzzingCrash,
   FuzzingStatus,
   FuzzingTargetAnalysis,
   CrashExploitability,
+  Severity,
 } from '@/types'
 
 const STATUS_CONFIG: Record<FuzzingStatus, { label: string; className: string }> = {
@@ -337,10 +340,14 @@ export default function FuzzingPage() {
         <div className="flex-1 overflow-y-auto p-6">
           {selectedCampaign ? (
             <CampaignDetail
+              projectId={projectId!}
               campaign={selectedCampaign}
               crashes={crashes}
               crashesLoading={crashesLoading}
               onTriage={handleTriage}
+              onCrashUpdate={(updated) =>
+                setCrashes((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
+              }
               onRefresh={async () => {
                 if (!projectId || !selectedId) return
                 try {
@@ -504,20 +511,66 @@ function CampaignCard({
 // ── Campaign Detail ──
 
 function CampaignDetail({
+  projectId,
   campaign,
   crashes,
   crashesLoading,
   onTriage,
   onRefresh,
+  onCrashUpdate,
 }: {
+  projectId: string
   campaign: FuzzingCampaign
   crashes: FuzzingCrash[]
   crashesLoading: boolean
   onTriage: (crashId: string) => void
   onRefresh: () => void
+  onCrashUpdate: (crash: FuzzingCrash) => void
 }) {
   const stats = campaign.stats
   const [expandedCrash, setExpandedCrash] = useState<string | null>(null)
+  const [hexDumps, setHexDumps] = useState<Record<string, string | null>>({})
+  const [hexLoading, setHexLoading] = useState<Record<string, boolean>>({})
+  const [findingCreating, setFindingCreating] = useState<Record<string, boolean>>({})
+
+  const loadHexDump = async (crashId: string) => {
+    if (hexDumps[crashId] !== undefined) return
+    setHexLoading((prev) => ({ ...prev, [crashId]: true }))
+    try {
+      const detail = await getCrashDetail(projectId, campaign.id, crashId)
+      setHexDumps((prev) => ({ ...prev, [crashId]: detail.crash_input_hex }))
+    } catch {
+      setHexDumps((prev) => ({ ...prev, [crashId]: null }))
+    } finally {
+      setHexLoading((prev) => ({ ...prev, [crashId]: false }))
+    }
+  }
+
+  const handleCreateFinding = async (crash: FuzzingCrash) => {
+    setFindingCreating((prev) => ({ ...prev, [crash.id]: true }))
+    try {
+      const finding = await createFinding(projectId, {
+        title: `Fuzzing crash: ${crash.signal || 'unknown signal'} in ${campaign.binary_path}`,
+        severity: exploitabilityToSeverity(crash.exploitability),
+        description: [
+          `AFL++ fuzzing discovered a crash in \`${campaign.binary_path}\`.`,
+          '',
+          `- **Crash file:** ${crash.crash_filename}`,
+          `- **Signal:** ${crash.signal || 'unknown'}`,
+          `- **Exploitability:** ${crash.exploitability || 'not triaged'}`,
+          crash.crash_size != null ? `- **Input size:** ${crash.crash_size} bytes` : '',
+        ].filter(Boolean).join('\n'),
+        evidence: crash.triage_output || crash.stack_trace || undefined,
+        file_path: campaign.binary_path,
+        source: 'fuzzing',
+      })
+      onCrashUpdate({ ...crash, finding_id: finding.id })
+    } catch {
+      // ignore
+    } finally {
+      setFindingCreating((prev) => ({ ...prev, [crash.id]: false }))
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -620,7 +673,11 @@ function CampaignDetail({
           return (
             <div key={crash.id} className="rounded-lg border border-border">
               <button
-                onClick={() => setExpandedCrash(isExpanded ? null : crash.id)}
+                onClick={() => {
+                  const next = isExpanded ? null : crash.id
+                  setExpandedCrash(next)
+                  if (next) loadHexDump(crash.id)
+                }}
                 className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-accent/50 transition-colors"
               >
                 <div className="min-w-0 flex-1">
@@ -681,7 +738,49 @@ function CampaignDetail({
                       </pre>
                     </div>
                   )}
-                  {!crash.triage_output && (
+
+                  {/* Hex dump of crash input */}
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">Crash Input</p>
+                    {hexLoading[crash.id] ? (
+                      <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Loading crash input...
+                      </div>
+                    ) : hexDumps[crash.id] ? (
+                      <pre className="max-h-48 overflow-auto rounded-md bg-[#0a0a0b] p-2 text-[11px] text-zinc-300 font-mono">
+                        {formatHexDump(hexDumps[crash.id]!)}
+                      </pre>
+                    ) : hexDumps[crash.id] === null ? (
+                      <p className="text-xs text-muted-foreground/60">Crash input not available</p>
+                    ) : null}
+                  </div>
+
+                  {/* Create finding button */}
+                  {crash.triage_output && !crash.finding_id && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      disabled={findingCreating[crash.id]}
+                      onClick={() => handleCreateFinding(crash)}
+                    >
+                      {findingCreating[crash.id] ? (
+                        <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                      ) : (
+                        <ShieldAlert className="mr-1.5 h-3 w-3" />
+                      )}
+                      Create Finding
+                    </Button>
+                  )}
+                  {crash.finding_id && (
+                    <div className="flex items-center gap-1.5 text-xs text-green-500">
+                      <ShieldAlert className="h-3 w-3" />
+                      Finding created
+                    </div>
+                  )}
+
+                  {!crash.triage_output && !crash.finding_id && (
                     <p className="text-xs text-muted-foreground">
                       Click "Triage" to reproduce this crash and analyze exploitability.
                     </p>
@@ -726,4 +825,31 @@ function formatDuration(seconds: number): string {
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
   return `${h}h ${m}m`
+}
+
+function formatHexDump(hex: string): string {
+  const bytes: number[] = []
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes.push(parseInt(hex.slice(i, i + 2), 16))
+  }
+  const lines: string[] = []
+  for (let offset = 0; offset < bytes.length; offset += 16) {
+    const chunk = bytes.slice(offset, offset + 16)
+    const addr = offset.toString(16).padStart(8, '0')
+    const hexPart = chunk.map((b) => b.toString(16).padStart(2, '0')).join(' ')
+    const ascii = chunk
+      .map((b) => (b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : '.'))
+      .join('')
+    lines.push(`${addr}  ${hexPart.padEnd(48)}  |${ascii}|`)
+  }
+  return lines.join('\n')
+}
+
+function exploitabilityToSeverity(e: CrashExploitability | null): Severity {
+  switch (e) {
+    case 'exploitable': return 'critical'
+    case 'probably_exploitable': return 'high'
+    case 'probably_not': return 'medium'
+    default: return 'medium'
+  }
 }
