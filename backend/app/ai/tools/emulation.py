@@ -311,6 +311,32 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
         handler=_handle_diagnose_environment,
     )
 
+    registry.register(
+        name="troubleshoot_emulation",
+        description=(
+            "Get a firmware-aware troubleshooting guide for system-mode emulation issues. "
+            "Call this when emulation isn't working as expected — services not listening, "
+            "boot hangs, kernel panics, MTD errors, network issues, etc. "
+            "Returns structured advice tailored to the firmware's characteristics "
+            "(detected from the filesystem). Optionally pass a symptom keyword to "
+            "filter to the most relevant section."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "symptom": {
+                    "type": "string",
+                    "description": (
+                        "Optional symptom to filter advice. Keywords: "
+                        "'service_not_listening', 'boot_hang', 'kernel_panic', "
+                        "'network', 'mtd', 'crash', 'httpd', or free text."
+                    ),
+                },
+            },
+        },
+        handler=_handle_troubleshoot_emulation,
+    )
+
     # ── Emulation Presets ──
 
     registry.register(
@@ -1142,6 +1168,326 @@ async def _handle_diagnose_environment(input: dict, context: ToolContext) -> str
         )
 
     return "\n".join(lines)
+
+
+async def _handle_troubleshoot_emulation(input: dict, context: ToolContext) -> str:
+    """Return a firmware-aware troubleshooting guide for emulation issues."""
+
+    symptom = (input.get("symptom") or "").strip().lower()
+
+    # ── Detect firmware characteristics ──
+    has_etc_ro = False
+    has_mtd_deps = False
+    has_webroot = False
+    arch = "unknown"
+
+    result = await context.db.execute(
+        select(Firmware).where(Firmware.id == context.firmware_id)
+    )
+    firmware = result.scalar_one_or_none()
+
+    if firmware:
+        arch = firmware.architecture or "unknown"
+        fs_root = firmware.extracted_path or ""
+        if fs_root and os.path.isdir(fs_root):
+            has_etc_ro = os.path.isdir(os.path.join(fs_root, "etc_ro"))
+            has_webroot = os.path.isdir(os.path.join(fs_root, "webroot"))
+
+            # Quick MTD scan on a few key binaries
+            for scan_dir in ["bin", "sbin", "usr/bin", "usr/sbin"]:
+                full_dir = os.path.join(fs_root, scan_dir)
+                if not os.path.isdir(full_dir):
+                    continue
+                try:
+                    for entry in os.scandir(full_dir):
+                        if has_mtd_deps:
+                            break
+                        if not entry.is_file() or entry.is_symlink():
+                            continue
+                        try:
+                            size = entry.stat().st_size
+                            if size < 1000 or size > 50_000_000:
+                                continue
+                            with open(entry.path, "rb") as bf:
+                                data = bf.read(min(size, 500_000))
+                            if b"get_mtd_size" in data or b"get_mtd_num" in data:
+                                has_mtd_deps = True
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
+
+    # ── Build guide sections ──
+
+    sections: dict[str, tuple[list[str], list[str]]] = {}
+    # Each section: (keywords, lines)
+
+    # 1. Service not listening
+    service_lines = [
+        "## Service Not Listening on Expected Port",
+        "",
+        "- **Interface mismatch**: Many firmware binaries bind to br0, not eth0.",
+        "  Rename in pre-init: add `ip link set eth0 name br0` to pre_init_script.",
+        "- **Check if running**: Use `ps` in emulation to verify the service started.",
+        "  It may have crashed silently — run it in the foreground first to see errors.",
+        "- **Config manager dependency**: Services like httpd often depend on a config",
+        "  manager (cfmd, cfg_init) to populate runtime config before they can start.",
+    ]
+    if has_etc_ro:
+        service_lines.append(
+            "  This firmware has /etc_ro — try: `mkdir -p /cfg && cp /webroot/default.cfg /cfg/mib.cfg`"
+        )
+    service_lines += [
+        "- **Don't start services directly in pre-init**: Pre-init runs before the",
+        "  firmware's init. Services started there may be killed when init remounts",
+        "  tmpfs or runs rcS. Instead, append startup commands to rcS:",
+        '  `echo "/bin/httpd &" >> /etc_ro/init.d/rcS`',
+        "- **Port forwarding**: Verify port_forwards param maps host→guest correctly.",
+        "  QEMU SLiRP uses socat relay: host port → 127.0.0.1:guest_port+10000.",
+    ]
+    if has_webroot:
+        service_lines += [
+            "",
+            "### Web Server (httpd) Specific",
+            "- httpd may bind to a specific interface IP, not 0.0.0.0. Use",
+            "  `extract_strings` on the httpd binary to find IP/interface references.",
+            "- Check if httpd needs br0 specifically (common in Tenda/TP-Link firmware).",
+            "- Config manager must seed /cfg before httpd will start properly.",
+        ]
+    sections["service_not_listening"] = (
+        ["service", "listen", "port", "httpd", "web", "connect", "curl", "wget", "refused"],
+        service_lines,
+    )
+
+    # 2. Boot hangs
+    boot_lines = [
+        "## Boot Hangs / No Shell Prompt",
+        "",
+        "- **sulogin blocking**: If boot stops at 'Give root password for maintenance',",
+        "  the init wrapper should have already cleared the root password. However,",
+        "  some busybox builds hardcode /etc_ro/inittab (not /etc/inittab).",
+        "- **Use init_path=/bin/sh**: Bypass the firmware's init entirely to get a",
+        "  shell with all wairz setup (mounts, networking, pre-init) already done.",
+        "  Then manually run rcS or start services to debug what's failing.",
+        "- **Check boot logs**: Use `get_emulation_logs` to see kernel messages and",
+        "  init output. Look for mount failures, missing devices, or panic messages.",
+        "- **Patience with ext4**: Filesystem creation for large firmware takes 60-90s.",
+        "  Wait at least 2 minutes before assuming boot is hung.",
+        "- **askfirst prompt**: BusyBox init with 'askfirst' entries prints",
+        "  'Please press Enter to activate this console' — send an empty command",
+        "  via run_command_in_emulation to proceed.",
+    ]
+    sections["boot_hang"] = (
+        ["boot", "hang", "stuck", "prompt", "shell", "sulogin", "password", "freeze"],
+        boot_lines,
+    )
+
+    # 3. Kernel panic / crash
+    kernel_lines = [
+        "## Kernel Panic / Crash",
+        "",
+        "- **Architecture must match exactly**: mips vs mipsel matters. A MIPS BE",
+        "  kernel won't boot MIPS LE firmware and vice versa.",
+    ]
+    if "mips" in arch:
+        kernel_lines.append(
+            "- **MIPS FPU requirement**: QEMU MIPS needs CPU=34Kf (MIPS32r2 with FPU).",
+            )
+        kernel_lines.append(
+            "  The default 24Kc/4Kc CPUs lack FPU and cause illegal instruction traps."
+        )
+    kernel_lines += [
+        "- **Don't use firmware-extracted kernels**: Kernels extracted from firmware",
+        "  images rarely work in QEMU (missing virtio drivers, wrong config).",
+        "  Use pre-built kernels: Debian, OpenWrt, or Buildroot for QEMU.",
+        "- **Check logs**: `get_emulation_logs` shows the panic message.",
+        "  Common causes: missing root filesystem driver, wrong console= param,",
+        "  incompatible kernel version for the firmware's userspace.",
+        "- **Kernel/userspace ABI mismatch**: Very old firmware (kernel 2.6.x) may",
+        "  not work with newer QEMU kernels. Check firmware's /lib/libc.so to",
+        "  determine the expected kernel ABI version.",
+    ]
+    sections["kernel_panic"] = (
+        ["kernel", "panic", "crash", "oops", "illegal", "instruction", "trap"],
+        kernel_lines,
+    )
+
+    # 4. MTD / flash errors
+    mtd_lines = [
+        "## MTD / Flash Errors",
+        "",
+        "- **Auto-injected stub**: The init wrapper automatically sets",
+        "  `LD_PRELOAD=/opt/stubs/fake_mtd.so` which intercepts common MTD functions:",
+        "  mtd_open, get_mtd_size, get_mtd_num, flash_read, flash_write.",
+        "- **File-backed storage**: The stub creates /tmp/fake_mtd_*.bin files that",
+        "  simulate flash partitions. Read/write operations are backed by these files.",
+        "- **Wireless ioctls**: The stub also intercepts wireless ioctls (0x8B00-0x8BFF)",
+        "  to prevent httpd InitCountryCode failures.",
+        "- **Missing functions**: If a binary imports custom MTD functions not covered",
+        "  by the stub, use `extract_strings` on the binary to identify them, then",
+        "  check `list_imports` to see which library provides them.",
+    ]
+    if has_mtd_deps:
+        mtd_lines += [
+            "",
+            "**This firmware has MTD-dependent binaries.** The fake_mtd stub should",
+            "handle most cases automatically. If you still see MTD errors, check which",
+            "specific function is failing in the emulation logs.",
+        ]
+    mtd_lines += [
+        "- **musl libc note**: musl does NOT support /etc/ld.so.preload.",
+        "  LD_PRELOAD env var is the only way to inject shared libraries.",
+    ]
+    sections["mtd"] = (
+        ["mtd", "flash", "nand", "nor", "partition", "ld_preload", "fake_mtd"],
+        mtd_lines,
+    )
+
+    # 5. Network issues
+    network_lines = [
+        "## Network Issues",
+        "",
+        "- **QEMU user-mode networking**: guest=10.0.2.15/24, gateway=10.0.2.2,",
+        "  DNS=10.0.2.3. The init wrapper configures eth0 automatically.",
+        "- **Port forwarding**: Uses socat relay (host 0.0.0.0:PORT → guest",
+        "  127.0.0.1:PORT+10000). Verify with `check_emulation_status`.",
+        "- **Interface naming**: If firmware expects br0 (bridge), rename in pre-init:",
+        "  `ip link set eth0 name br0 && ip addr add 10.0.2.15/24 dev br0 && ip link set br0 up`",
+        "- **Binding to interface IP**: Some services bind to a specific interface's",
+        "  IP rather than 0.0.0.0. Use `extract_strings` on the binary to find",
+        "  hardcoded IPs or interface names.",
+        "- **ICMP/ping won't work**: QEMU user-mode networking doesn't support ICMP.",
+        "  Use TCP connections to test connectivity (wget, curl, nc).",
+        "- **DNS**: The guest can resolve DNS via 10.0.2.3 (forwarded to host DNS).",
+    ]
+    sections["network"] = (
+        ["network", "eth0", "br0", "interface", "ip", "route", "dns", "ping", "connect"],
+        network_lines,
+    )
+
+    # 6. Pre-init best practices
+    preinit_lines = [
+        "## Pre-init Script Best Practices",
+        "",
+        "- Pre-init runs BEFORE the firmware's init — use it for environment setup only.",
+        "- **Better pattern**: Set up interfaces, dirs, and config in pre-init. Append",
+        "  service startup to rcS so it runs at the right point in the boot sequence.",
+        "  Example:",
+        "    ```",
+        "    # pre-init: setup only",
+        "    ip link set eth0 name br0",
+        "    ip addr add 10.0.2.15/24 dev br0",
+        "    ip link set br0 up",
+        "    mkdir -p /cfg",
+        "    cp /webroot/default.cfg /cfg/mib.cfg",
+        '    echo "/bin/cfmd &" >> /etc_ro/init.d/rcS',
+        '    echo "sleep 2 && /bin/httpd &" >> /etc_ro/init.d/rcS',
+        "    ```",
+        "- **LD_PRELOAD**: Auto-set by the init wrapper — don't duplicate in pre-init.",
+        "- **musl libc**: No /etc/ld.so.preload support. Only LD_PRELOAD env var works.",
+        "- Pre-init is sourced (not exec'd) — env vars are inherited by firmware init.",
+    ]
+    sections["preinit"] = (
+        ["pre_init", "preinit", "pre-init", "script", "setup", "ld_preload", "environment"],
+        preinit_lines,
+    )
+
+    # 7. Common firmware patterns
+    pattern_lines = [
+        "## Common Firmware Patterns",
+        "",
+    ]
+    if has_etc_ro:
+        pattern_lines += [
+            "### Tenda / TP-Link Style (detected: /etc_ro present)",
+            "- /etc is often a symlink to /dev/null in the squashfs image.",
+            "  The init wrapper fixes this and populates /etc from /etc_ro.",
+            "- cfmd (config manager) manages /cfg — seed with default.cfg before",
+            "  starting services: `cp /webroot/default.cfg /cfg/mib.cfg`",
+            "- httpd typically needs br0 interface, not eth0.",
+            "- BusyBox may hardcode /etc_ro/inittab path (not /etc/inittab).",
+            "- Boot sequence: rcS → cfmd → monitor → (httpd needs manual start)",
+            "  Read rcS to understand the actual boot order.",
+            "",
+        ]
+    pattern_lines += [
+        "### General Embedded Linux",
+        "- Read /etc/init.d/rcS (or /etc_ro/init.d/rcS) to understand boot sequence.",
+        "- Look for cfg_init, cfmd, or similar config managers that seed runtime state.",
+        "- Network services often start late in boot — wait for init to complete.",
+        "- Many services depend on /proc, /sys, /dev being mounted (init wrapper does this).",
+        "",
+        "### OpenWrt",
+        "- Uses procd init system, /etc/config for UCI configuration.",
+        "- uhttpd is the default web server (port 80/443).",
+        "- Procd reads /etc/inittab, runs /etc/init.d/* scripts.",
+    ]
+    sections["patterns"] = (
+        ["pattern", "firmware", "tenda", "tp-link", "openwrt", "dd-wrt", "general", "common"],
+        pattern_lines,
+    )
+
+    # ── Filter by symptom if provided ──
+
+    selected_sections: list[list[str]] = []
+
+    if symptom:
+        for _section_name, (keywords, lines) in sections.items():
+            if any(kw in symptom for kw in keywords):
+                selected_sections.append(lines)
+
+        # If no keyword matched, do a fuzzy match against all section content
+        if not selected_sections:
+            for _section_name, (_keywords, lines) in sections.items():
+                joined = " ".join(lines).lower()
+                # Check if any word from the symptom appears in the section
+                symptom_words = [w for w in symptom.split() if len(w) > 2]
+                if any(word in joined for word in symptom_words):
+                    selected_sections.append(lines)
+
+        if not selected_sections:
+            # Still nothing — return everything with a note
+            selected_sections = [lines for (_kw, lines) in sections.values()]
+            header_note = (
+                f"No specific section matched symptom '{symptom}'. "
+                "Showing full troubleshooting guide.\n"
+            )
+        else:
+            header_note = f"Filtered for symptom: {symptom}\n"
+    else:
+        selected_sections = [lines for (_kw, lines) in sections.values()]
+        header_note = ""
+
+    # ── Build output ──
+
+    output_lines = [
+        "=== Emulation Troubleshooting Guide ===",
+        f"Architecture: {arch}",
+    ]
+    if has_etc_ro:
+        output_lines.append("Detected: /etc_ro present (Tenda/TP-Link style firmware)")
+    if has_mtd_deps:
+        output_lines.append("Detected: MTD-dependent binaries (fake_mtd stub auto-injected)")
+    if has_webroot:
+        output_lines.append("Detected: /webroot present (web interface firmware)")
+    output_lines.append("")
+    if header_note:
+        output_lines.append(header_note)
+
+    for section_lines in selected_sections:
+        output_lines.extend(section_lines)
+        output_lines.append("")
+
+    output_lines += [
+        "---",
+        "Tips:",
+        "- Use `diagnose_emulation_environment` for pre-flight static checks.",
+        "- Use `get_emulation_logs` to see boot output and error messages.",
+        "- Use `init_path=/bin/sh` to bypass init and get a shell for manual debugging.",
+        "- Use `check_emulation_status` to verify session state and port forwards.",
+    ]
+
+    return "\n".join(output_lines)
 
 
 # ---------------------------------------------------------------------------
