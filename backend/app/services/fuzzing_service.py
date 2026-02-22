@@ -4,8 +4,11 @@ Uses the Docker SDK to spawn isolated containers running AFL++ in QEMU mode
 for cross-architecture firmware binary fuzzing.
 """
 
+import base64
+import io
 import logging
 import os
+import tarfile
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -22,7 +25,7 @@ from app.utils.sandbox import validate_path
 
 logger = logging.getLogger(__name__)
 
-# Architecture → QEMU user-mode trace binary for AFL++
+# Architecture → AFL++ QEMU trace binary (instrumented QEMU for coverage)
 QEMU_TRACE_MAP: dict[str, str] = {
     "arm": "afl-qemu-trace-arm",
     "aarch64": "afl-qemu-trace-aarch64",
@@ -30,6 +33,16 @@ QEMU_TRACE_MAP: dict[str, str] = {
     "mipsel": "afl-qemu-trace-mipsel",
     "x86": "afl-qemu-trace-i386",
     "x86_64": "afl-qemu-trace-x86_64",
+}
+
+# Architecture → stock QEMU user-mode static binary (for crash triage)
+QEMU_USER_MAP: dict[str, str] = {
+    "arm": "qemu-arm-static",
+    "aarch64": "qemu-aarch64-static",
+    "mips": "qemu-mips-static",
+    "mipsel": "qemu-mipsel-static",
+    "x86": "qemu-i386-static",
+    "x86_64": "qemu-x86_64-static",
 }
 
 # Dangerous sink functions — indicate fuzzing value
@@ -65,6 +78,46 @@ class FuzzingService:
 
     def _get_docker_client(self) -> docker.DockerClient:
         return docker.from_env()
+
+    @staticmethod
+    def _write_file_to_container(
+        container: "docker.models.containers.Container",
+        dest_path: str,
+        data: bytes,
+    ) -> None:
+        """Write arbitrary bytes to a file inside a container using put_archive."""
+        dest_dir = os.path.dirname(dest_path)
+        dest_name = os.path.basename(dest_path)
+
+        tar_stream = io.BytesIO()
+        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+            info = tarfile.TarInfo(name=dest_name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        tar_stream.seek(0)
+
+        container.put_archive(dest_dir, tar_stream)
+
+    @staticmethod
+    def _write_seeds_to_container(
+        container: "docker.models.containers.Container",
+        seeds_b64: list[str],
+    ) -> None:
+        """Write base64-encoded seed files to /opt/fuzzing/input/ using put_archive."""
+        tar_stream = io.BytesIO()
+        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+            for i, seed_b64 in enumerate(seeds_b64):
+                try:
+                    seed_data = base64.b64decode(seed_b64)
+                except Exception:
+                    logger.warning("Failed to decode seed corpus entry %d", i)
+                    continue
+                info = tarfile.TarInfo(name=f"seed_{i}")
+                info.size = len(seed_data)
+                tar.addfile(info, io.BytesIO(seed_data))
+        tar_stream.seek(0)
+
+        container.put_archive("/opt/fuzzing/input", tar_stream)
 
     def _resolve_host_path(self, container_path: str) -> str | None:
         """Resolve a container path to a host path for Docker volume mounts."""
@@ -328,43 +381,56 @@ class FuzzingService:
             # Set up AFL++ working directories
             container.exec_run(["mkdir", "-p", "/opt/fuzzing/input", "/opt/fuzzing/output"])
 
-            # Generate seed corpus
+            # Write seed corpus using put_archive for binary-safe transfer
             seed_corpus = config.get("seed_corpus")
             if seed_corpus:
-                import base64
-                for i, seed_b64 in enumerate(seed_corpus):
-                    try:
-                        seed_data = base64.b64decode(seed_b64)
-                        container.exec_run([
-                            "sh", "-c",
-                            f"echo -n '{seed_data.hex()}' | xxd -r -p > /opt/fuzzing/input/seed_{i}"
-                        ])
-                    except Exception:
-                        logger.warning("Failed to decode seed corpus entry %d", i)
+                self._write_seeds_to_container(container, seed_corpus)
             else:
                 # Create a minimal default seed
-                container.exec_run([
-                    "sh", "-c",
-                    "echo -n 'AAAA' > /opt/fuzzing/input/default_seed"
-                ])
+                self._write_seeds_to_container(
+                    container, [base64.b64encode(b"AAAA").decode()]
+                )
 
             # Write dictionary if provided
             dictionary = config.get("dictionary")
             if dictionary:
-                container.exec_run([
-                    "sh", "-c",
-                    f"cat > /opt/fuzzing/dictionary.dict << 'DICTEOF'\n{dictionary}\nDICTEOF"
-                ])
+                self._write_file_to_container(
+                    container,
+                    "/opt/fuzzing/dictionary.dict",
+                    dictionary.encode("utf-8"),
+                )
+
+            # Resolve the architecture-specific AFL++ QEMU trace binary
+            qemu_trace = QEMU_TRACE_MAP.get(arch)
+            if not qemu_trace:
+                raise ValueError(
+                    f"Unsupported architecture for fuzzing: {arch}. "
+                    f"Supported: {', '.join(QEMU_TRACE_MAP.keys())}"
+                )
+
+            # Symlink the arch-specific trace binary so afl-fuzz -Q finds it
+            container.exec_run([
+                "ln", "-sf",
+                f"/usr/local/bin/{qemu_trace}",
+                "/usr/local/bin/afl-qemu-trace",
+            ])
 
             # Build AFL++ command
             timeout_ms = config.get("timeout_per_exec", 1000)
-            mem_limit = config.get("memory_limit", 256)
             binary_in_firmware = campaign.binary_path.lstrip("/")
 
+            # QEMU mode requires -m none: QEMU reserves a large virtual
+            # address space for the guest (e.g. 2GB for MIPS) which is
+            # not actual memory usage; a fixed -m limit causes mmap to
+            # fail.  The Docker container's --memory limit handles real
+            # memory enforcement.
             afl_cmd = (
                 f"AFL_NO_UI=1 "
+                f"AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 "
+                f"AFL_SKIP_CPUFREQ=1 "
+                f"QEMU_LD_PREFIX=/firmware "
                 f"afl-fuzz -Q -i /opt/fuzzing/input -o /opt/fuzzing/output "
-                f"-m {mem_limit} -t {timeout_ms} "
+                f"-m none -t {timeout_ms} "
             )
 
             if dictionary:
@@ -570,7 +636,15 @@ class FuzzingService:
     async def triage_crash(
         self, campaign_id: UUID, crash_id: UUID
     ) -> FuzzingCrash:
-        """Reproduce a crash with GDB and classify exploitability."""
+        """Reproduce a crash under QEMU user mode and classify exploitability.
+
+        For cross-architecture firmware binaries, GDB alone cannot execute the
+        binary on x86_64.  Instead we:
+          1. Run the binary under qemu-{arch}-static with the crash input,
+             capturing the exit signal.
+          2. Optionally attach gdb-multiarch via QEMU's GDB server for a
+             stack trace (best-effort).
+        """
         result = await self.db.execute(
             select(FuzzingCrash).where(
                 FuzzingCrash.id == crash_id,
@@ -596,6 +670,9 @@ class FuzzingService:
         if not firmware:
             raise ValueError("Firmware not found")
 
+        arch = firmware.architecture or "arm"
+        qemu_bin = QEMU_USER_MAP.get(arch, "qemu-arm-static")
+
         client = self._get_docker_client()
         try:
             container = client.containers.get(campaign.container_id)
@@ -605,54 +682,94 @@ class FuzzingService:
         binary_in_firmware = campaign.binary_path.lstrip("/")
         crash_path = f"/opt/fuzzing/output/default/crashes/{crash.crash_filename}"
 
-        # Run binary under gdb-multiarch with crash input
-        gdb_cmd = (
-            f"timeout 30 gdb-multiarch -batch "
-            f"-ex 'set confirm off' "
-            f"-ex 'run < {crash_path}' "
-            f"-ex 'bt' "
-            f"-ex 'info registers' "
-            f"-ex 'info signal' "
-            f"--args /firmware/{binary_in_firmware}"
-        )
+        triage_output = ""
 
         try:
-            triage_result = container.exec_run(["sh", "-c", gdb_cmd], demux=True)
-            stdout = (triage_result.output[0] or b"").decode("utf-8", errors="replace")
-            stderr = (triage_result.output[1] or b"").decode("utf-8", errors="replace")
+            # Step 1: Reproduce the crash under QEMU user-mode to get the signal
+            reproduce_cmd = (
+                f"QEMU_LD_PREFIX=/firmware "
+                f"timeout 30 {qemu_bin} /firmware/{binary_in_firmware} "
+                f"< {crash_path} 2>&1; echo EXIT_CODE=$?"
+            )
+            reproduce_result = container.exec_run(
+                ["sh", "-c", reproduce_cmd], demux=True
+            )
+            stdout = (reproduce_result.output[0] or b"").decode("utf-8", errors="replace")
+            stderr = (reproduce_result.output[1] or b"").decode("utf-8", errors="replace")
 
-            triage_output = stdout
+            triage_output = f"=== QEMU reproduction ({qemu_bin}) ===\n{stdout}"
             if stderr:
                 triage_output += f"\n--- stderr ---\n{stderr}"
 
-            # Extract signal from GDB output
+            # Step 2: Try GDB remote debugging for a stack trace.
+            # Launch QEMU with -g (GDB server) on a known port, then connect
+            # gdb-multiarch to get a backtrace.
+            gdb_port = 12345
+            gdb_cmd = (
+                f"timeout 30 sh -c '"
+                f"QEMU_LD_PREFIX=/firmware "
+                f"{qemu_bin} -g {gdb_port} /firmware/{binary_in_firmware} "
+                f"< {crash_path} &"
+                f" sleep 1 &&"
+                f" gdb-multiarch -batch"
+                f" -ex \"set confirm off\""
+                f" -ex \"target remote :{gdb_port}\""
+                f" -ex \"continue\""
+                f" -ex \"bt\""
+                f" -ex \"info registers\""
+                f" /firmware/{binary_in_firmware}"
+                f"'"
+            )
+            gdb_result = container.exec_run(["sh", "-c", gdb_cmd], demux=True)
+            gdb_stdout = (gdb_result.output[0] or b"").decode("utf-8", errors="replace")
+            gdb_stderr = (gdb_result.output[1] or b"").decode("utf-8", errors="replace")
+
+            if gdb_stdout.strip():
+                triage_output += f"\n\n=== GDB backtrace ===\n{gdb_stdout}"
+            if gdb_stderr.strip():
+                triage_output += f"\n--- gdb stderr ---\n{gdb_stderr}"
+
+            # Classify based on signal
             signal = None
             exploitability = "unknown"
 
-            if "SIGSEGV" in triage_output:
+            # Check QEMU output and exit code for signal info
+            combined = triage_output
+
+            if "SIGSEGV" in combined or "Segmentation fault" in combined:
                 signal = "SIGSEGV"
-                # Check if write to unmapped memory (more exploitable)
-                if "Cannot access memory at address" in triage_output:
-                    exploitability = "probably_exploitable"
-                else:
-                    exploitability = "probably_exploitable"
-            elif "SIGABRT" in triage_output:
+                exploitability = "probably_exploitable"
+            elif "SIGABRT" in combined or "Aborted" in combined:
                 signal = "SIGABRT"
                 exploitability = "exploitable"
-            elif "SIGBUS" in triage_output:
+            elif "SIGBUS" in combined or "Bus error" in combined:
                 signal = "SIGBUS"
                 exploitability = "probably_exploitable"
-            elif "SIGFPE" in triage_output:
+            elif "SIGFPE" in combined:
                 signal = "SIGFPE"
                 exploitability = "probably_not"
-            elif "SIGILL" in triage_output:
+            elif "SIGILL" in combined or "Illegal instruction" in combined:
                 signal = "SIGILL"
                 exploitability = "probably_exploitable"
-            elif "SIGTRAP" in triage_output:
+            elif "SIGTRAP" in combined:
                 signal = "SIGTRAP"
                 exploitability = "probably_not"
+            else:
+                # Infer from QEMU exit code (128 + signal_number)
+                exit_code = reproduce_result.exit_code or 0
+                if exit_code > 128:
+                    sig_num = exit_code - 128
+                    sig_map = {11: "SIGSEGV", 6: "SIGABRT", 7: "SIGBUS",
+                               8: "SIGFPE", 4: "SIGILL", 5: "SIGTRAP"}
+                    signal = sig_map.get(sig_num, f"SIG{sig_num}")
+                    if signal in ("SIGSEGV", "SIGBUS", "SIGILL"):
+                        exploitability = "probably_exploitable"
+                    elif signal == "SIGABRT":
+                        exploitability = "exploitable"
+                    else:
+                        exploitability = "unknown"
 
-            # Extract stack trace
+            # Extract stack trace from GDB output
             stack_trace = ""
             in_bt = False
             for line in triage_output.split("\n"):
