@@ -10,6 +10,9 @@ class FuzzingCampaignCreateRequest(BaseModel):
     memory_limit: int = Field(default=256, ge=64, le=1024)
     dictionary: str | None = None
     seed_corpus: list[str] | None = None  # base64-encoded seed inputs
+    arguments: str | None = None  # appended after binary (e.g., "@@" for file-based)
+    environment: dict[str, str] | None = None  # extra env vars for target
+    harness_script: str | None = None  # shell wrapper script content
 
 
 class FuzzingCampaignResponse(BaseModel):

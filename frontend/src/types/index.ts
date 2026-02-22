@@ -421,6 +421,9 @@ export interface FuzzingCampaignCreateRequest {
   memory_limit?: number
   dictionary?: string
   seed_corpus?: string[]
+  arguments?: string
+  environment?: Record<string, string>
+  harness_script?: string
 }
 
 // ── Component Map types ──

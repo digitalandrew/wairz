@@ -122,6 +122,31 @@ def register_fuzzing_tools(registry: ToolRegistry) -> None:
                     "items": {"type": "string"},
                     "description": "Base64-encoded seed input files",
                 },
+                "arguments": {
+                    "type": "string",
+                    "description": (
+                        "Arguments appended after the target binary in the AFL++ command. "
+                        "Use '@@' for file-based fuzzing so AFL++ passes the fuzz input "
+                        "as a file path argument to the binary."
+                    ),
+                },
+                "environment": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Extra environment variables to set for the AFL++ target execution "
+                        "(e.g., {\"REQUEST_METHOD\": \"POST\", \"CONTENT_TYPE\": \"application/x-www-form-urlencoded\"})."
+                    ),
+                },
+                "harness_script": {
+                    "type": "string",
+                    "description": (
+                        "Shell script content to use as the AFL++ target instead of "
+                        "the binary directly. The script is written to the container "
+                        "and executed via /firmware/bin/sh. Useful for CGI-style binaries "
+                        "that need environment variable setup before execution."
+                    ),
+                },
             },
             "required": ["binary_path"],
         },
@@ -166,6 +191,41 @@ def register_fuzzing_tools(registry: ToolRegistry) -> None:
             "required": ["campaign_id"],
         },
         handler=_handle_stop_campaign,
+    )
+
+    registry.register(
+        name="generate_fuzzing_harness",
+        description=(
+            "Generate a fuzzing harness/configuration for a firmware binary based "
+            "on its input type. Analyzes the binary to determine the best fuzzing "
+            "approach and returns concrete parameters to pass to start_fuzzing_campaign. "
+            "For stdin targets: direct fuzzing with no wrapper. "
+            "For file-based targets: uses @@ argument so AFL++ passes fuzz input as a file. "
+            "For network/CGI targets: generates a shell wrapper that sets CGI environment "
+            "variables and pipes stdin to the binary. "
+            "For daemon-style network targets: notes limitations and suggests alternatives. "
+            "Use analyze_fuzzing_target first to understand the binary, then this tool "
+            "to get the right campaign configuration."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the binary within the firmware filesystem (e.g., /usr/sbin/httpd)",
+                },
+                "input_type": {
+                    "type": "string",
+                    "enum": ["stdin", "file", "network"],
+                    "description": (
+                        "Override the input type (stdin/file/network). "
+                        "If omitted, auto-detected from analyze_fuzzing_target results."
+                    ),
+                },
+            },
+            "required": ["binary_path"],
+        },
+        handler=_handle_generate_harness,
     )
 
     registry.register(
@@ -393,6 +453,214 @@ async def _handle_generate_seed_corpus(input: dict, context: ToolContext) -> str
     return "\n".join(lines)
 
 
+async def _handle_generate_harness(input: dict, context: ToolContext) -> str:
+    """Generate a fuzzing harness/configuration for a firmware binary."""
+    binary_path = input.get("binary_path", "")
+    if not binary_path:
+        return "Error: binary_path is required."
+
+    result = await context.db.execute(
+        select(Firmware).where(Firmware.id == context.firmware_id)
+    )
+    firmware = result.scalar_one_or_none()
+    if not firmware:
+        return "Error: firmware not found."
+
+    # Run target analysis to determine strategy
+    svc = FuzzingService(context.db)
+    try:
+        analysis = await svc.analyze_target(firmware, binary_path)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    if analysis.get("error"):
+        return f"Error analyzing {binary_path}: {analysis['error']}"
+
+    input_type = input.get("input_type") or analysis["recommended_strategy"]
+    imports = set(analysis.get("imports_of_interest", []))
+    binary_basename = binary_path.rstrip("/").rsplit("/", 1)[-1]
+
+    lines: list[str] = [
+        f"Fuzzing Harness for: {binary_path}",
+        f"  Detected strategy: {analysis['recommended_strategy']}",
+        f"  Using strategy: {input_type}",
+        "",
+    ]
+
+    campaign_params: dict = {}
+
+    if input_type == "stdin":
+        lines.append("Strategy: STDIN fuzzing (direct)")
+        lines.append("")
+        lines.append("No wrapper needed — AFL++ pipes fuzz input directly to the binary's stdin.")
+        lines.append("This works well for binaries that read from stdin (read, fgets, getline, scanf).")
+        lines.append("")
+        lines.append("Recommended start_fuzzing_campaign parameters:")
+        lines.append(f'  binary_path: "{binary_path}"')
+        lines.append("  (no extra arguments needed)")
+
+        campaign_params = {
+            "binary_path": binary_path,
+        }
+
+    elif input_type == "file":
+        # Detect likely file extensions from strings
+        ext = _guess_file_extension(analysis)
+        arg_str = f"@@{ext}" if ext else "@@"
+
+        lines.append("Strategy: FILE-based fuzzing")
+        lines.append("")
+        lines.append(
+            "AFL++ replaces @@ with the path to the current fuzz input file. "
+            "The binary receives the fuzz file as a command-line argument."
+        )
+        if ext:
+            lines.append(f"  Detected likely file extension: {ext}")
+        lines.append("")
+        lines.append("Recommended start_fuzzing_campaign parameters:")
+        lines.append(f'  binary_path: "{binary_path}"')
+        lines.append(f'  arguments: "{arg_str}"')
+
+        campaign_params = {
+            "binary_path": binary_path,
+            "arguments": arg_str,
+        }
+
+    elif input_type == "network":
+        # Determine if this is CGI-style or daemon-style
+        is_cgi = _is_cgi_binary(analysis, binary_basename)
+
+        if is_cgi:
+            lines.append("Strategy: NETWORK fuzzing (CGI-style via harness script)")
+            lines.append("")
+            lines.append(
+                "This binary appears to be a CGI-style program that reads HTTP input "
+                "via environment variables and stdin. The harness script sets up the "
+                "CGI environment and pipes AFL++ fuzz input to the binary."
+            )
+
+            harness = _generate_cgi_harness(binary_path)
+
+            lines.append("")
+            lines.append("Generated harness script:")
+            lines.append("```")
+            lines.append(harness)
+            lines.append("```")
+            lines.append("")
+            lines.append("Recommended start_fuzzing_campaign parameters:")
+            lines.append(f'  binary_path: "{binary_path}"')
+            lines.append('  harness_script: (the script above)')
+
+            campaign_params = {
+                "binary_path": binary_path,
+                "harness_script": harness,
+            }
+        else:
+            lines.append("Strategy: NETWORK fuzzing (daemon-style — limited support)")
+            lines.append("")
+            lines.append(
+                "This binary appears to be a network daemon (uses socket/bind/listen/accept). "
+                "Direct daemon fuzzing is NOT supported in QEMU user mode because the "
+                "binary forks and listens on a socket rather than reading from stdin."
+            )
+            lines.append("")
+            lines.append("Alternative approaches:")
+            lines.append("  1. **Stdin redirection**: If the binary has a CLI/debug mode that ")
+            lines.append("     reads from stdin, use stdin strategy instead.")
+            lines.append("  2. **LD_PRELOAD desocketing**: Use a preload library (e.g., ")
+            lines.append("     preeny's desock.so) to redirect socket I/O to stdin/stdout. ")
+            lines.append("     Set environment: {\"LD_PRELOAD\": \"/path/to/desock.so\"}")
+            lines.append("  3. **CGI handler fuzzing**: If the daemon delegates to CGI handlers, ")
+            lines.append("     fuzz those handlers directly with the CGI harness approach.")
+            lines.append("  4. **Function-level fuzzing**: Write a custom harness that calls ")
+            lines.append("     specific parsing functions from the binary's shared libraries.")
+            lines.append("")
+            lines.append("If you want to attempt stdin redirection anyway:")
+            lines.append(f'  binary_path: "{binary_path}"')
+            lines.append("  (AFL++ will pipe fuzz input to stdin — may not reach network code)")
+
+            campaign_params = {
+                "binary_path": binary_path,
+                "_note": "Daemon-style binary — stdin fuzzing may have limited coverage",
+            }
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Campaign parameters summary:")
+    for k, v in campaign_params.items():
+        if k.startswith("_"):
+            lines.append(f"  Note: {v}")
+        elif k == "harness_script":
+            lines.append(f"  {k}: (script, {len(v)} chars)")
+        else:
+            lines.append(f"  {k}: {v}")
+
+    return "\n".join(lines)
+
+
+def _guess_file_extension(analysis: dict) -> str:
+    """Guess the file extension a binary expects from its imports/strings."""
+    # Common patterns based on imported functions
+    imports = set(analysis.get("imports_of_interest", []))
+
+    # XML parsing
+    if imports & {"XML_Parse", "xmlParseFile", "xmlReadFile", "expat_parse"}:
+        return ".xml"
+    # JSON parsing
+    if imports & {"json_parse", "cJSON_Parse", "json_tokener_parse"}:
+        return ".json"
+
+    return ""
+
+
+def _is_cgi_binary(analysis: dict, basename: str) -> bool:
+    """Heuristic: is this a CGI-style binary rather than a standalone daemon?"""
+    imports = set(analysis.get("imports_of_interest", []))
+    network_funcs = set(analysis.get("network_functions", []))
+
+    # CGI indicators: uses getenv but not socket/bind/listen
+    has_getenv = "getenv" in imports
+    has_server_socket = bool(network_funcs & {"bind", "listen", "accept"})
+
+    # Common CGI binary names
+    cgi_names = {"cgi", "cgi-bin", "goform", "goahead", "webs", "mini_httpd"}
+    name_lower = basename.lower()
+    name_suggests_cgi = any(n in name_lower for n in cgi_names)
+
+    if has_getenv and not has_server_socket:
+        return True
+    if name_suggests_cgi and not has_server_socket:
+        return True
+
+    return False
+
+
+def _generate_cgi_harness(binary_path: str) -> str:
+    """Generate a shell harness script for CGI-style binary fuzzing."""
+    binary_in_firmware = binary_path.lstrip("/")
+    return f"""#!/bin/sh
+# CGI fuzzing harness for {binary_path}
+# AFL++ pipes fuzz input to this script's stdin.
+# The script sets up CGI environment variables and forwards stdin to the binary.
+
+INPUT_SIZE=$(wc -c < /dev/stdin | tr -d ' ')
+
+export REQUEST_METHOD=POST
+export CONTENT_TYPE="application/x-www-form-urlencoded"
+export CONTENT_LENGTH="$INPUT_SIZE"
+export SCRIPT_NAME="/{binary_in_firmware}"
+export QUERY_STRING=""
+export SERVER_NAME="127.0.0.1"
+export SERVER_PORT="80"
+export REMOTE_ADDR="127.0.0.1"
+export HTTP_HOST="127.0.0.1"
+export GATEWAY_INTERFACE="CGI/1.1"
+export SERVER_PROTOCOL="HTTP/1.1"
+
+exec /firmware/{binary_in_firmware}
+"""
+
+
 async def _handle_start_campaign(input: dict, context: ToolContext) -> str:
     """Create and start a fuzzing campaign."""
     binary_path = input.get("binary_path", "")
@@ -415,6 +683,12 @@ async def _handle_start_campaign(input: dict, context: ToolContext) -> str:
         config["dictionary"] = input["dictionary"]
     if "seed_corpus" in input:
         config["seed_corpus"] = input["seed_corpus"]
+    if "arguments" in input:
+        config["arguments"] = input["arguments"]
+    if "environment" in input:
+        config["environment"] = input["environment"]
+    if "harness_script" in input:
+        config["harness_script"] = input["harness_script"]
 
     svc = FuzzingService(context.db)
     try:

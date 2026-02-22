@@ -418,9 +418,28 @@ class FuzzingService:
                 "/usr/local/bin/afl-qemu-trace",
             ])
 
+            # Write harness script if provided
+            harness_script = config.get("harness_script")
+            harness_target = None
+            if harness_script:
+                harness_content = harness_script.encode("utf-8")
+                self._write_file_to_container(
+                    container,
+                    "/opt/fuzzing/harness.sh",
+                    harness_content,
+                )
+                container.exec_run(["chmod", "+x", "/opt/fuzzing/harness.sh"])
+                harness_target = "/opt/fuzzing/harness.sh"
+
             # Build AFL++ command
             timeout_ms = config.get("timeout_per_exec", 1000)
             binary_in_firmware = campaign.binary_path.lstrip("/")
+
+            # Extra environment variables for the target
+            extra_env = config.get("environment") or {}
+            env_prefix = " ".join(
+                f"{k}={v}" for k, v in extra_env.items()
+            )
 
             # QEMU mode requires -m none: QEMU reserves a large virtual
             # address space for the guest (e.g. 2GB for MIPS) which is
@@ -432,6 +451,12 @@ class FuzzingService:
                 f"AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 "
                 f"AFL_SKIP_CPUFREQ=1 "
                 f"QEMU_LD_PREFIX=/firmware "
+            )
+
+            if env_prefix:
+                afl_cmd += f"{env_prefix} "
+
+            afl_cmd += (
                 f"afl-fuzz -Q -i /opt/fuzzing/input -o /opt/fuzzing/output "
                 f"-m none -t {timeout_ms} "
             )
@@ -439,7 +464,16 @@ class FuzzingService:
             if dictionary:
                 afl_cmd += "-x /opt/fuzzing/dictionary.dict "
 
-            afl_cmd += f"-- /firmware/{binary_in_firmware}"
+            # Determine the target: harness script or binary directly
+            if harness_target:
+                afl_cmd += f"-- /firmware/bin/sh {harness_target}"
+            else:
+                afl_cmd += f"-- /firmware/{binary_in_firmware}"
+
+            # Append extra arguments (e.g., @@ for file-based fuzzing)
+            arguments = config.get("arguments")
+            if arguments:
+                afl_cmd += f" {arguments}"
 
             # Launch AFL++ in background
             container.exec_run([
