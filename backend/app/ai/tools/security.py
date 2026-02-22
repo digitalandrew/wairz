@@ -2,17 +2,32 @@
 
 Tools for evaluating the security posture of an extracted firmware filesystem:
 config file auditing, setuid detection, init script analysis, filesystem
-permissions, and CVE lookups.
+permissions, CVE lookups, and certificate analysis.
 """
 
+import logging
 import os
 import re
 import stat
+from datetime import datetime, timezone
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.utils.sandbox import safe_walk, validate_path
 
+logger = logging.getLogger(__name__)
+
 MAX_RESULTS = 100
+
+# Certificate file extensions to scan for
+_CERT_EXTENSIONS = {".pem", ".crt", ".cer", ".der", ".p12", ".pfx"}
+
+# Directories commonly containing certificates in firmware
+_CERT_SEARCH_DIRS = [
+    "etc/ssl", "etc/ssl/certs", "etc/ssl/private",
+    "etc/pki", "etc/pki/tls", "etc/pki/tls/certs",
+    "etc/certificates", "etc/https", "etc/lighttpd",
+    "usr/share/ca-certificates", "etc/ca-certificates",
+]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -511,6 +526,252 @@ async def _handle_check_filesystem_permissions(input: dict, context: ToolContext
 
 
 # ---------------------------------------------------------------------------
+# analyze_certificate
+# ---------------------------------------------------------------------------
+
+
+def _find_cert_files(extracted_root: str, search_path: str | None) -> list[str]:
+    """Find certificate files in the firmware filesystem."""
+    real_root = os.path.realpath(extracted_root)
+    cert_files: list[str] = []
+
+    if search_path:
+        # Scan a specific file or directory
+        full_path = os.path.join(real_root, search_path.lstrip("/"))
+        if os.path.isfile(full_path):
+            return [full_path]
+        if os.path.isdir(full_path):
+            for dirpath, _dirs, files in safe_walk(full_path):
+                for name in files:
+                    _, ext = os.path.splitext(name)
+                    if ext.lower() in _CERT_EXTENSIONS:
+                        cert_files.append(os.path.join(dirpath, name))
+                    elif _is_pem_file(os.path.join(dirpath, name)):
+                        cert_files.append(os.path.join(dirpath, name))
+            return cert_files
+
+    # Scan known certificate directories
+    for cert_dir in _CERT_SEARCH_DIRS:
+        full_dir = os.path.join(real_root, cert_dir)
+        if not os.path.isdir(full_dir):
+            continue
+        for dirpath, _dirs, files in safe_walk(full_dir):
+            for name in files:
+                abs_path = os.path.join(dirpath, name)
+                _, ext = os.path.splitext(name)
+                if ext.lower() in _CERT_EXTENSIONS:
+                    cert_files.append(abs_path)
+                elif _is_pem_file(abs_path):
+                    cert_files.append(abs_path)
+
+    # Also scan entire filesystem for cert extensions if nothing found yet
+    if not cert_files:
+        for dirpath, _dirs, files in safe_walk(real_root):
+            for name in files:
+                _, ext = os.path.splitext(name)
+                if ext.lower() in _CERT_EXTENSIONS:
+                    cert_files.append(os.path.join(dirpath, name))
+                if len(cert_files) >= MAX_RESULTS:
+                    break
+            if len(cert_files) >= MAX_RESULTS:
+                break
+
+    return cert_files
+
+
+def _is_pem_file(path: str) -> bool:
+    """Quick check if a file looks like PEM format."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(64)
+        return b"-----BEGIN" in header
+    except (OSError, PermissionError):
+        return False
+
+
+def _audit_certificate(cert_data: bytes, file_path: str, real_root: str) -> dict:
+    """Parse and audit a single certificate. Returns a dict with info and issues."""
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
+    except ImportError:
+        return {"error": "cryptography library not installed"}
+
+    cert = None
+    parse_error = None
+
+    # Try PEM first, then DER
+    try:
+        cert = x509.load_pem_x509_certificate(cert_data)
+    except Exception:
+        try:
+            cert = x509.load_der_x509_certificate(cert_data)
+        except Exception as exc:
+            parse_error = str(exc)
+
+    if cert is None:
+        return {"error": f"Failed to parse certificate: {parse_error}"}
+
+    rel_path = "/" + os.path.relpath(file_path, real_root)
+    now = datetime.now(timezone.utc)
+
+    # Extract info
+    info: dict = {
+        "path": rel_path,
+        "subject": cert.subject.rfc4514_string(),
+        "issuer": cert.issuer.rfc4514_string(),
+        "not_before": cert.not_valid_before_utc.isoformat(),
+        "not_after": cert.not_valid_after_utc.isoformat(),
+        "serial": str(cert.serial_number),
+    }
+
+    # Key info
+    pub_key = cert.public_key()
+    if isinstance(pub_key, rsa.RSAPublicKey):
+        info["key_type"] = "RSA"
+        info["key_size"] = pub_key.key_size
+    elif isinstance(pub_key, ec.EllipticCurvePublicKey):
+        info["key_type"] = "EC"
+        info["key_size"] = pub_key.key_size
+    elif isinstance(pub_key, dsa.DSAPublicKey):
+        info["key_type"] = "DSA"
+        info["key_size"] = pub_key.key_size
+    else:
+        info["key_type"] = type(pub_key).__name__
+        info["key_size"] = 0
+
+    # Signature algorithm
+    info["signature_algorithm"] = cert.signature_algorithm_oid._name
+
+    # Self-signed check
+    info["self_signed"] = cert.issuer == cert.subject
+
+    # SANs
+    try:
+        san_ext = cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        )
+        info["sans"] = [str(n) for n in san_ext.value]
+    except x509.ExtensionNotFound:
+        info["sans"] = []
+
+    # Wildcard check
+    cn_values = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+    info["wildcard"] = any("*" in attr.value for attr in cn_values)
+
+    # Security issues
+    issues: list[dict] = []
+
+    # Expired
+    if now > cert.not_valid_after_utc:
+        issues.append({
+            "severity": "HIGH",
+            "issue": f"Certificate expired on {cert.not_valid_after_utc.date()}",
+        })
+
+    # Not yet valid
+    if now < cert.not_valid_before_utc:
+        issues.append({
+            "severity": "MEDIUM",
+            "issue": f"Certificate not valid until {cert.not_valid_before_utc.date()}",
+        })
+
+    # Weak key size
+    if info["key_type"] == "RSA" and info["key_size"] < 2048:
+        issues.append({
+            "severity": "HIGH",
+            "issue": f"Weak RSA key size: {info['key_size']} bits (minimum 2048)",
+        })
+
+    # Weak signature algorithm
+    sig_algo = info["signature_algorithm"].lower()
+    if "md5" in sig_algo:
+        issues.append({
+            "severity": "CRITICAL",
+            "issue": "MD5 signature algorithm (broken, trivially forgeable)",
+        })
+    elif "sha1" in sig_algo:
+        issues.append({
+            "severity": "HIGH",
+            "issue": "SHA-1 signature algorithm (deprecated, collision attacks exist)",
+        })
+
+    # Self-signed
+    if info["self_signed"]:
+        issues.append({
+            "severity": "MEDIUM",
+            "issue": "Self-signed certificate (no third-party trust chain)",
+        })
+
+    # Wildcard
+    if info["wildcard"]:
+        issues.append({
+            "severity": "LOW",
+            "issue": "Wildcard certificate",
+        })
+
+    info["issues"] = issues
+    return info
+
+
+async def _handle_analyze_certificate(input: dict, context: ToolContext) -> str:
+    """Parse and audit X.509 certificates found in the firmware."""
+    real_root = os.path.realpath(context.extracted_path)
+    search_path = input.get("path")
+
+    # Find certificate files
+    cert_files = _find_cert_files(context.extracted_path, search_path)
+
+    if not cert_files:
+        return "No certificate files found in the firmware filesystem."
+
+    results: list[dict] = []
+    for cert_file in cert_files[:MAX_RESULTS]:
+        try:
+            with open(cert_file, "rb") as f:
+                cert_data = f.read(100_000)  # 100KB limit per cert
+        except (OSError, PermissionError):
+            continue
+
+        result = _audit_certificate(cert_data, cert_file, real_root)
+        if "error" not in result:
+            results.append(result)
+
+    if not results:
+        return (
+            f"Found {len(cert_files)} certificate file(s) but none could be parsed. "
+            "Files may be in an unsupported format or corrupted."
+        )
+
+    # Build output
+    total_issues = sum(len(r.get("issues", [])) for r in results)
+    lines = [
+        f"Analyzed {len(results)} certificate(s), {total_issues} issue(s) found:",
+        "",
+    ]
+
+    for r in results:
+        issues = r.get("issues", [])
+        issue_summary = f"  [{len(issues)} issue(s)]" if issues else "  [OK]"
+        lines.append(f"## {r['path']}{issue_summary}")
+        lines.append(f"  Subject:    {r['subject']}")
+        lines.append(f"  Issuer:     {r['issuer']}")
+        lines.append(f"  Valid:      {r['not_before'][:10]} to {r['not_after'][:10]}")
+        lines.append(f"  Key:        {r['key_type']} {r['key_size']} bits")
+        lines.append(f"  Signature:  {r['signature_algorithm']}")
+        if r.get("self_signed"):
+            lines.append(f"  Self-signed: yes")
+        if r.get("sans"):
+            lines.append(f"  SANs:       {', '.join(r['sans'][:10])}")
+
+        for issue in issues:
+            lines.append(f"  [{issue['severity']}] {issue['issue']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -626,4 +887,33 @@ def register_security_tools(registry: ToolRegistry) -> None:
             "required": [],
         },
         handler=_handle_check_filesystem_permissions,
+    )
+
+    registry.register(
+        name="analyze_certificate",
+        description=(
+            "Parse and audit X.509 certificates (PEM and DER format) found in "
+            "the firmware. Reports subject, issuer, validity dates, key type and "
+            "size, signature algorithm, SANs, and self-signed status. Flags "
+            "security issues: expired certs, weak keys (<2048 RSA), weak "
+            "signatures (MD5, SHA-1), self-signed certs, and wildcards. "
+            "If no path given, scans /etc/ssl/, /etc/pki/, and common cert "
+            "directories. Pass a file path to analyze a specific certificate."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Path to a certificate file or directory to scan. "
+                        "If omitted, scans common certificate directories "
+                        "(/etc/ssl/, /etc/pki/, etc.) and falls back to "
+                        "scanning the entire filesystem by extension."
+                    ),
+                },
+            },
+            "required": [],
+        },
+        handler=_handle_analyze_certificate,
     )

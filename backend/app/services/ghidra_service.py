@@ -139,7 +139,7 @@ def _build_analyze_command(
     return cmd
 
 
-async def _run_ghidra_subprocess(
+async def run_ghidra_subprocess(
     binary_path: str,
     script_name: str,
     script_args: list[str] | None = None,
@@ -184,8 +184,14 @@ async def _run_ghidra_subprocess(
         stderr_text = stderr.decode("utf-8", errors="replace")
 
         if process.returncode != 0:
-            # Ghidra often returns non-zero but still produces output
-            if _START_MARKER not in stdout_text and _DECOMPILE_START not in stdout_text:
+            # Ghidra often returns non-zero but still produces output.
+            # Check for any known output marker before declaring failure.
+            known_markers = (
+                _START_MARKER, _DECOMPILE_START,
+                "===STRING_REFS_START===", "===TAINT_START===",
+            )
+            has_output = any(m in stdout_text for m in known_markers)
+            if not has_output:
                 logger.error(
                     "Ghidra failed (rc=%d): %s",
                     process.returncode,
@@ -218,6 +224,10 @@ class GhidraAnalysisCache:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _compute_sha256, binary_path)
 
+    async def get_binary_sha256(self, binary_path: str) -> str:
+        """Public wrapper: compute SHA256 in a thread."""
+        return await self._get_binary_sha256(binary_path)
+
     async def _is_analysis_complete(
         self,
         firmware_id: uuid.UUID,
@@ -232,6 +242,16 @@ class GhidraAnalysisCache:
         )
         result = await db.execute(stmt)
         return result.scalar_one_or_none() is not None
+
+    async def get_cached(
+        self,
+        firmware_id: uuid.UUID,
+        binary_sha256: str,
+        operation: str,
+        db: AsyncSession,
+    ) -> dict | None:
+        """Get a cached result by operation key (public API)."""
+        return await self._get_cached(firmware_id, binary_sha256, operation, db)
 
     async def _get_cached(
         self,
@@ -251,6 +271,20 @@ class GhidraAnalysisCache:
         if row is not None and isinstance(row, dict):
             return row
         return None
+
+    async def store_cached(
+        self,
+        firmware_id: uuid.UUID,
+        binary_path: str,
+        binary_sha256: str,
+        operation: str,
+        result_data: dict,
+        db: AsyncSession,
+    ) -> None:
+        """Store a result in the cache (public API)."""
+        await self._store_cached(
+            firmware_id, binary_path, binary_sha256, operation, result_data, db,
+        )
 
     async def _store_cached(
         self,
@@ -280,7 +314,7 @@ class GhidraAnalysisCache:
         db: AsyncSession,
     ) -> None:
         """Run AnalyzeBinary.java and store all results in DB."""
-        raw_output = await _run_ghidra_subprocess(binary_path, "AnalyzeBinary.java")
+        raw_output = await run_ghidra_subprocess(binary_path, "AnalyzeBinary.java")
 
         data = _parse_analysis_output(raw_output)
         if data is None:
@@ -594,7 +628,7 @@ class GhidraAnalysisCache:
 
         # If full analysis was done but this function wasn't decompiled,
         # fall back to single-function decompilation
-        raw_output = await _run_ghidra_subprocess(
+        raw_output = await run_ghidra_subprocess(
             binary_path,
             "DecompileFunction.java",
             script_args=[function_name],

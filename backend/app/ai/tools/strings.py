@@ -1,6 +1,7 @@
 """String analysis AI tools for firmware reverse engineering."""
 
 import asyncio
+import logging
 import math
 import os
 import re
@@ -9,9 +10,29 @@ from collections import Counter
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.utils.sandbox import safe_walk, validate_path
 
+logger = logging.getLogger(__name__)
+
 MAX_STRINGS = 200
 MAX_GREP_RESULTS = 100
 MAX_CRED_RESULTS = 100
+
+# Hash type identification for /etc/shadow analysis
+_HASH_TYPES = {
+    "$1$": ("MD5", "WEAK"),
+    "$2a$": ("Blowfish", "OK"),
+    "$2b$": ("Blowfish", "OK"),
+    "$2y$": ("Blowfish", "OK"),
+    "$5$": ("SHA-256", "OK"),
+    "$6$": ("SHA-512", "OK"),
+    "$y$": ("yescrypt", "OK"),
+}
+
+# Common default passwords found in embedded firmware
+_COMMON_PASSWORDS = [
+    "admin", "root", "password", "1234", "12345", "123456",
+    "default", "changeme", "toor", "pass", "guest", "user",
+    "test", "administrator", "support",
+]
 
 # Patterns for string categorisation
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -302,6 +323,154 @@ async def _handle_find_crypto_material(input: dict, context: ToolContext) -> str
     return "\n".join(parts)
 
 
+def _identify_hash_type(pw_hash: str) -> tuple[str, str]:
+    """Identify password hash type and strength. Returns (type_name, strength)."""
+    if not pw_hash or pw_hash in ("!", "*", "!!", "x", "NP", "LK"):
+        return ("locked/disabled", "N/A")
+    for prefix, (name, strength) in _HASH_TYPES.items():
+        if pw_hash.startswith(prefix):
+            return (name, strength)
+    # No known prefix — likely DES (traditional crypt, 13 chars)
+    if len(pw_hash) == 13 and pw_hash.isascii():
+        return ("DES", "WEAK")
+    return ("unknown", "UNKNOWN")
+
+
+def _try_common_passwords(pw_hash: str) -> str | None:
+    """Try cracking a hash against common default passwords."""
+    try:
+        import crypt
+    except ImportError:
+        return None
+
+    for password in _COMMON_PASSWORDS:
+        try:
+            if crypt.crypt(password, pw_hash) == pw_hash:
+                return password
+        except Exception:
+            continue
+    return None
+
+
+def _analyze_shadow_file(
+    shadow_path: str, display_path: str, results: list[dict[str, str]],
+) -> list[str]:
+    """Analyze a shadow file for password security issues. Returns issue lines."""
+    issues: list[str] = []
+    try:
+        with open(shadow_path, "r", errors="replace") as f:
+            for line_num, line in enumerate(f, 1):
+                parts = line.strip().split(":")
+                if len(parts) < 2:
+                    continue
+                user = parts[0]
+                pw_hash = parts[1]
+
+                if not pw_hash or pw_hash in ("", "!"):
+                    results.append({
+                        "file": display_path,
+                        "line": str(line_num),
+                        "match": f"User '{user}' has empty/disabled password hash: '{pw_hash}'",
+                        "entropy": "n/a",
+                        "category": "shadow",
+                    })
+                    if pw_hash == "":
+                        issues.append(
+                            f"  [CRITICAL] {display_path}:{line_num}: "
+                            f"User '{user}' has NO password (empty hash)"
+                        )
+                    continue
+
+                if pw_hash in ("*", "!!", "x", "NP", "LK"):
+                    continue  # Properly locked account
+
+                hash_type, strength = _identify_hash_type(pw_hash)
+
+                if strength == "WEAK":
+                    issues.append(
+                        f"  [HIGH] {display_path}:{line_num}: "
+                        f"User '{user}' uses weak {hash_type} password hash"
+                    )
+                    results.append({
+                        "file": display_path,
+                        "line": str(line_num),
+                        "match": f"User '{user}': weak {hash_type} hash",
+                        "entropy": "n/a",
+                        "category": "shadow_weak_hash",
+                    })
+
+                # Try common passwords
+                cracked = _try_common_passwords(pw_hash)
+                if cracked:
+                    issues.append(
+                        f"  [CRITICAL] {display_path}:{line_num}: "
+                        f"User '{user}' has default password: '{cracked}' "
+                        f"(hash type: {hash_type})"
+                    )
+                    results.append({
+                        "file": display_path,
+                        "line": str(line_num),
+                        "match": f"User '{user}': default password '{cracked}' ({hash_type})",
+                        "entropy": "n/a",
+                        "category": "shadow_cracked",
+                    })
+    except (OSError, PermissionError):
+        pass
+    return issues
+
+
+def _analyze_passwd_file(
+    passwd_path: str, display_path: str, results: list[dict[str, str]],
+) -> list[str]:
+    """Analyze a passwd file for security issues. Returns issue lines."""
+    issues: list[str] = []
+    try:
+        with open(passwd_path, "r", errors="replace") as f:
+            for line_num, line in enumerate(f, 1):
+                parts = line.strip().split(":")
+                if len(parts) < 7:
+                    continue
+                user = parts[0]
+                pw_field = parts[1]
+                uid = parts[2]
+                shell = parts[6]
+
+                # Flag uid=0 non-root accounts
+                if uid == "0" and user != "root":
+                    issues.append(
+                        f"  [HIGH] {display_path}:{line_num}: "
+                        f"Non-root account '{user}' has UID 0 (root-equivalent)"
+                    )
+                    results.append({
+                        "file": display_path,
+                        "line": str(line_num),
+                        "match": f"UID 0 non-root account: {user}",
+                        "entropy": "n/a",
+                        "category": "passwd_uid0",
+                    })
+
+                # Flag empty password field with login shell
+                no_login_shells = {
+                    "/bin/false", "/usr/bin/false", "/sbin/nologin",
+                    "/usr/sbin/nologin", "/bin/sync",
+                }
+                if pw_field == "" and shell.strip() not in no_login_shells:
+                    issues.append(
+                        f"  [CRITICAL] {display_path}:{line_num}: "
+                        f"User '{user}' has empty password field with login shell '{shell.strip()}'"
+                    )
+                    results.append({
+                        "file": display_path,
+                        "line": str(line_num),
+                        "match": f"Empty password with shell: {user} ({shell.strip()})",
+                        "entropy": "n/a",
+                        "category": "passwd_empty",
+                    })
+    except (OSError, PermissionError):
+        pass
+    return issues
+
+
 async def _handle_find_hardcoded_credentials(
     input: dict, context: ToolContext
 ) -> str:
@@ -310,26 +479,21 @@ async def _handle_find_hardcoded_credentials(
     real_root = os.path.realpath(context.extracted_path)
 
     results: list[dict[str, str]] = []
+    auth_issues: list[str] = []
 
-    # Check /etc/shadow for empty password hashes
-    shadow_path = os.path.join(real_root, "etc", "shadow")
-    if os.path.isfile(shadow_path):
-        try:
-            with open(shadow_path, "r", errors="replace") as f:
-                for line_num, line in enumerate(f, 1):
-                    parts = line.strip().split(":")
-                    if len(parts) >= 2:
-                        user = parts[0]
-                        pw_hash = parts[1]
-                        if pw_hash == "" or pw_hash == "!":
-                            results.append({
-                                "file": "/etc/shadow",
-                                "line": str(line_num),
-                                "match": f"User '{user}' has empty/disabled password hash: '{pw_hash}'",
-                                "entropy": "n/a",
-                            })
-        except (OSError, PermissionError):
-            pass
+    # Check /etc/shadow and /etc_ro/shadow for password security
+    for shadow_rel in ["etc/shadow", "etc_ro/shadow"]:
+        shadow_path = os.path.join(real_root, shadow_rel)
+        if os.path.isfile(shadow_path):
+            issues = _analyze_shadow_file(shadow_path, f"/{shadow_rel}", results)
+            auth_issues.extend(issues)
+
+    # Check /etc/passwd and /etc_ro/passwd for account issues
+    for passwd_rel in ["etc/passwd", "etc_ro/passwd"]:
+        passwd_path = os.path.join(real_root, passwd_rel)
+        if os.path.isfile(passwd_path):
+            issues = _analyze_passwd_file(passwd_path, f"/{passwd_rel}", results)
+            auth_issues.extend(issues)
 
     # Walk filesystem for credential patterns
     for dirpath, _dirs, files in safe_walk(search_path):
@@ -364,20 +528,30 @@ async def _handle_find_hardcoded_credentials(
                                     "line": str(line_num),
                                     "match": line.strip()[:200],
                                     "entropy": f"{entropy:.2f}",
+                                    "category": "credential_pattern",
                                 })
                                 break  # one match per line
             except (OSError, PermissionError):
                 continue
 
-    if not results:
+    if not results and not auth_issues:
         return "No hardcoded credentials found."
 
     # Build output
     parts: list[str] = [f"Found {len(results)} potential credential(s):", ""]
 
+    # Authentication issues section (shadow/passwd analysis)
+    if auth_issues:
+        parts.append(f"## Authentication Issues ({len(auth_issues)})")
+        parts.extend(auth_issues)
+        parts.append("")
+
+    # Separate remaining results by entropy
+    pattern_results = [r for r in results if r.get("category") == "credential_pattern"]
+
     high_entropy: list[dict[str, str]] = []
     low_entropy: list[dict[str, str]] = []
-    for r in results:
+    for r in pattern_results:
         if r["entropy"] == "n/a" or float(r["entropy"]) > 4.0:
             high_entropy.append(r)
         else:
@@ -485,10 +659,14 @@ def register_string_tools(registry: ToolRegistry) -> None:
         name="find_hardcoded_credentials",
         description=(
             "Search firmware filesystem for hardcoded passwords, API keys, tokens, "
-            "and other credentials. Checks for password/secret/token assignments in "
-            "text files and empty password hashes in /etc/shadow. "
-            "Results are ranked by Shannon entropy — high-entropy matches are more "
-            "likely to be real secrets. Max 100 results."
+            "and other credentials. Enhanced analysis includes:\n"
+            "- /etc/shadow & /etc_ro/shadow: hash type identification (DES, MD5, "
+            "SHA-256, SHA-512), weak hash flagging, and cracking against 15 common "
+            "default passwords (admin, root, password, 1234, etc.)\n"
+            "- /etc/passwd & /etc_ro/passwd: UID-0 non-root accounts, empty password "
+            "fields with login shells\n"
+            "- Filesystem scan: password/secret/token assignments in text files\n"
+            "Results ranked by Shannon entropy. Max 100 results."
         ),
         input_schema={
             "type": "object",

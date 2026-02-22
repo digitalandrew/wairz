@@ -337,6 +337,28 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
         handler=_handle_troubleshoot_emulation,
     )
 
+    registry.register(
+        name="enumerate_emulation_services",
+        description=(
+            "List all listening network services in a running system-mode emulation "
+            "session. Returns a table of listening ports with protocol, bound "
+            "address, and binary path. Tries `netstat -tlnp` first, falls back to "
+            "parsing /proc/net/tcp. Useful for identifying which services actually "
+            "started after boot and validating attack surface."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The emulation session ID (must be a running system-mode session)",
+                },
+            },
+            "required": ["session_id"],
+        },
+        handler=_handle_enumerate_services,
+    )
+
     # ── Emulation Presets ──
 
     registry.register(
@@ -1166,6 +1188,161 @@ async def _handle_diagnose_environment(input: dict, context: ToolContext) -> str
             "with system-mode emulation. Note that some runtime errors are "
             "expected (missing hardware, MTD flash, SoC-specific modules)."
         )
+
+    return "\n".join(lines)
+
+
+def _parse_proc_net_tcp(content: str) -> list[dict[str, str]]:
+    """Parse /proc/net/tcp or /proc/net/tcp6 hex format.
+
+    Returns list of {local_addr, local_port, state} for LISTEN entries.
+    State 0A = LISTEN in the kernel's TCP state machine.
+    """
+    listeners: list[dict[str, str]] = []
+    for line in content.strip().splitlines()[1:]:  # skip header
+        parts = line.strip().split()
+        if len(parts) < 4:
+            continue
+        # parts[1] = local_address:port in hex, parts[3] = state in hex
+        state = parts[3]
+        if state != "0A":  # 0A = LISTEN
+            continue
+        local = parts[1]
+        try:
+            addr_hex, port_hex = local.split(":")
+            port = int(port_hex, 16)
+            # Decode IP address (stored in little-endian on little-endian systems)
+            if len(addr_hex) == 8:
+                # IPv4
+                ip_int = int(addr_hex, 16)
+                ip = ".".join(str((ip_int >> (8 * i)) & 0xFF) for i in range(4))
+            else:
+                ip = "[::]"
+            listeners.append({
+                "address": ip,
+                "port": str(port),
+                "protocol": "tcp",
+            })
+        except (ValueError, IndexError):
+            continue
+    return listeners
+
+
+async def _handle_enumerate_services(input: dict, context: ToolContext) -> str:
+    """List listening network services in a running emulation session."""
+    session_id = input.get("session_id")
+    if not session_id:
+        return "Error: session_id is required."
+
+    from uuid import UUID
+    svc = EmulationService(context.db)
+
+    # Try netstat -tlnp first
+    listeners: list[dict[str, str]] = []
+    netstat_output = ""
+
+    try:
+        result = await svc.exec_command(
+            session_id=UUID(session_id),
+            command="netstat -tlnp",
+            timeout=10,
+        )
+        netstat_output = result.get("stdout", "")
+    except Exception:
+        pass
+
+    if netstat_output and "Active Internet" in netstat_output:
+        # Parse netstat output
+        for line in netstat_output.splitlines():
+            line = line.strip()
+            if not line.startswith("tcp"):
+                continue
+            parts = line.split()
+            if len(parts) < 7:
+                continue
+            proto = parts[0]
+            local_addr = parts[3]
+            state = parts[5] if len(parts) > 5 else ""
+            program = parts[6] if len(parts) > 6 else "-"
+            if "LISTEN" not in state and "listen" not in state.lower():
+                continue
+            listeners.append({
+                "protocol": proto,
+                "address": local_addr,
+                "port": local_addr.rsplit(":", 1)[-1] if ":" in local_addr else "?",
+                "program": program,
+            })
+    else:
+        # Fallback: parse /proc/net/tcp
+        try:
+            result = await svc.exec_command(
+                session_id=UUID(session_id),
+                command="cat /proc/net/tcp",
+                timeout=10,
+            )
+            tcp_content = result.get("stdout", "")
+            if tcp_content:
+                listeners = _parse_proc_net_tcp(tcp_content)
+        except Exception:
+            pass
+
+        # Also try /proc/net/tcp6
+        try:
+            result = await svc.exec_command(
+                session_id=UUID(session_id),
+                command="cat /proc/net/tcp6",
+                timeout=10,
+            )
+            tcp6_content = result.get("stdout", "")
+            if tcp6_content:
+                listeners.extend(_parse_proc_net_tcp(tcp6_content))
+        except Exception:
+            pass
+
+    # Get process list for context
+    ps_output = ""
+    try:
+        result = await svc.exec_command(
+            session_id=UUID(session_id),
+            command="ps -ef",
+            timeout=10,
+        )
+        ps_output = result.get("stdout", "")
+        if not ps_output:
+            result = await svc.exec_command(
+                session_id=UUID(session_id),
+                command="ps",
+                timeout=10,
+            )
+            ps_output = result.get("stdout", "")
+    except Exception:
+        pass
+
+    if not listeners:
+        lines = ["No listening TCP services detected."]
+        if ps_output:
+            lines.append("")
+            lines.append("Running processes:")
+            lines.append(ps_output[:3000])
+        return "\n".join(lines)
+
+    lines = [f"Found {len(listeners)} listening TCP service(s):", ""]
+    for l in listeners:
+        prog = l.get("program", "-")
+        lines.append(
+            f"  {l.get('protocol', 'tcp'):>5}  {l.get('address', '?'):>25}  "
+            f"port {l['port']:<6}  {prog}"
+        )
+
+    if ps_output:
+        lines.append("")
+        lines.append("Running processes:")
+        # Truncate to keep output reasonable
+        ps_lines = ps_output.splitlines()
+        for pl in ps_lines[:30]:
+            lines.append(f"  {pl}")
+        if len(ps_lines) > 30:
+            lines.append(f"  ... ({len(ps_lines) - 30} more)")
 
     return "\n".join(lines)
 
