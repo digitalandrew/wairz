@@ -9,6 +9,7 @@ import os
 
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.config import get_settings
+from app.models.emulation_preset import EmulationPreset
 from app.models.emulation_session import EmulationSession
 from app.models.firmware import Firmware
 from app.services.emulation_service import EmulationService
@@ -308,6 +309,104 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "properties": {},
         },
         handler=_handle_diagnose_environment,
+    )
+
+    # ── Emulation Presets ──
+
+    registry.register(
+        name="save_emulation_preset",
+        description=(
+            "Save the current emulation configuration as a named preset for this project. "
+            "Use this after iterating to a working emulation setup so you can re-use it "
+            "without re-entering all the configuration. Presets are per-project."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name for the preset (e.g., 'Tenda AC8 httpd')",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional description of what this preset does",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["user", "system"],
+                    "description": "Emulation mode",
+                },
+                "binary_path": {
+                    "type": "string",
+                    "description": "Binary path (for user mode)",
+                },
+                "arguments": {
+                    "type": "string",
+                    "description": "Command-line arguments (for user mode)",
+                },
+                "port_forwards": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "host": {"type": "integer"},
+                            "guest": {"type": "integer"},
+                        },
+                        "required": ["host", "guest"],
+                    },
+                    "description": "Port forwarding rules",
+                },
+                "kernel_name": {
+                    "type": "string",
+                    "description": "Kernel name (for system mode)",
+                },
+                "init_path": {
+                    "type": "string",
+                    "description": "Init override path (for system mode)",
+                },
+                "pre_init_script": {
+                    "type": "string",
+                    "description": "Pre-init shell script (for system mode)",
+                },
+            },
+            "required": ["name", "mode"],
+        },
+        handler=_handle_save_preset,
+    )
+
+    registry.register(
+        name="list_emulation_presets",
+        description=(
+            "List all saved emulation presets for the current project. "
+            "Shows preset names, modes, and descriptions."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        handler=_handle_list_presets,
+    )
+
+    registry.register(
+        name="start_emulation_from_preset",
+        description=(
+            "Start an emulation session using a saved preset's configuration. "
+            "Loads the preset by name or ID and starts emulation with its settings."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "preset_name": {
+                    "type": "string",
+                    "description": "Name of the preset to use (case-insensitive match)",
+                },
+                "preset_id": {
+                    "type": "string",
+                    "description": "UUID of the preset (alternative to preset_name)",
+                },
+            },
+        },
+        handler=_handle_start_from_preset,
     )
 
 
@@ -1043,3 +1142,122 @@ async def _handle_diagnose_environment(input: dict, context: ToolContext) -> str
         )
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Preset tool handlers
+# ---------------------------------------------------------------------------
+
+
+async def _handle_save_preset(input: dict, context: ToolContext) -> str:
+    """Save an emulation configuration as a named preset."""
+    name = input.get("name", "").strip()
+    mode = input.get("mode", "")
+
+    if not name:
+        return "Error: name is required."
+    if mode not in ("user", "system"):
+        return "Error: mode must be 'user' or 'system'."
+
+    svc = EmulationService(context.db)
+    try:
+        preset = await svc.create_preset(
+            project_id=context.project_id,
+            name=name,
+            mode=mode,
+            description=input.get("description"),
+            binary_path=input.get("binary_path"),
+            arguments=input.get("arguments"),
+            port_forwards=input.get("port_forwards", []),
+            kernel_name=input.get("kernel_name"),
+            init_path=input.get("init_path"),
+            pre_init_script=input.get("pre_init_script"),
+        )
+        await context.db.commit()
+    except Exception as exc:
+        return f"Error saving preset: {exc}"
+
+    lines = [
+        f"Preset saved successfully.",
+        f"  Name: {preset.name}",
+        f"  ID: {preset.id}",
+        f"  Mode: {preset.mode}",
+    ]
+    if preset.description:
+        lines.append(f"  Description: {preset.description}")
+    if preset.pre_init_script:
+        lines.append(f"  Pre-init script: {len(preset.pre_init_script)} chars")
+    lines.append("")
+    lines.append("Use start_emulation_from_preset to start a session with this preset.")
+
+    return "\n".join(lines)
+
+
+async def _handle_list_presets(input: dict, context: ToolContext) -> str:
+    """List saved emulation presets for the current project."""
+    svc = EmulationService(context.db)
+    presets = await svc.list_presets(context.project_id)
+
+    if not presets:
+        return "No emulation presets saved for this project."
+
+    lines = [f"Emulation presets ({len(presets)}):\n"]
+    for p in presets:
+        desc = f" — {p.description}" if p.description else ""
+        lines.append(f"  [{p.mode}] {p.name}{desc}")
+        lines.append(f"    ID: {p.id}")
+        if p.binary_path:
+            lines.append(f"    Binary: {p.binary_path}")
+        if p.pre_init_script:
+            lines.append(f"    Pre-init script: {len(p.pre_init_script)} chars")
+        if p.port_forwards:
+            pf_strs = [f"{pf['host']}:{pf['guest']}" for pf in p.port_forwards]
+            lines.append(f"    Ports: {', '.join(pf_strs)}")
+
+    return "\n".join(lines)
+
+
+async def _handle_start_from_preset(input: dict, context: ToolContext) -> str:
+    """Start an emulation session from a saved preset."""
+    preset_name = input.get("preset_name", "").strip()
+    preset_id = input.get("preset_id", "").strip()
+
+    if not preset_name and not preset_id:
+        return "Error: either preset_name or preset_id is required."
+
+    svc = EmulationService(context.db)
+
+    # Find the preset
+    preset = None
+    if preset_id:
+        try:
+            from uuid import UUID
+            preset = await svc.get_preset(UUID(preset_id))
+        except ValueError:
+            return f"Error: preset with ID '{preset_id}' not found."
+    else:
+        # Search by name (case-insensitive)
+        presets = await svc.list_presets(context.project_id)
+        for p in presets:
+            if p.name.lower() == preset_name.lower():
+                preset = p
+                break
+        if not preset:
+            return (
+                f"Error: no preset named '{preset_name}' found. "
+                "Use list_emulation_presets to see available presets."
+            )
+
+    # Start emulation using the preset's config
+    start_input = {
+        "mode": preset.mode,
+        "binary_path": preset.binary_path,
+        "arguments": preset.arguments,
+        "port_forwards": preset.port_forwards or [],
+        "kernel_name": preset.kernel_name,
+        "init_path": preset.init_path,
+        "pre_init_script": preset.pre_init_script,
+    }
+
+    result = await _handle_start_emulation(start_input, context)
+    return f"Starting from preset '{preset.name}'...\n\n{result}"

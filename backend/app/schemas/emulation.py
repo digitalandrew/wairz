@@ -49,3 +49,56 @@ class EmulationExecResponse(BaseModel):
     stderr: str
     exit_code: int
     timed_out: bool
+
+
+# ── Emulation Presets ──
+
+
+class PortForwardItem(BaseModel):
+    host: int
+    guest: int
+
+
+class EmulationPresetCreate(BaseModel):
+    name: str = Field(..., max_length=255)
+    description: str | None = None
+    mode: Literal["user", "system"]
+    binary_path: str | None = None
+    arguments: str | None = None
+    architecture: str | None = None
+    port_forwards: list[PortForwardItem] = []
+    kernel_name: str | None = None
+    init_path: str | None = None
+    pre_init_script: str | None = None
+
+
+class EmulationPresetUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    description: str | None = None
+    mode: Literal["user", "system"] | None = None
+    binary_path: str | None = None
+    arguments: str | None = None
+    architecture: str | None = None
+    port_forwards: list[PortForwardItem] | None = None
+    kernel_name: str | None = None
+    init_path: str | None = None
+    pre_init_script: str | None = None
+
+
+class EmulationPresetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    description: str | None
+    mode: str
+    binary_path: str | None
+    arguments: str | None
+    architecture: str | None
+    port_forwards: list[dict] | None
+    kernel_name: str | None
+    init_path: str | None
+    pre_init_script: str | None
+    created_at: datetime
+    updated_at: datetime

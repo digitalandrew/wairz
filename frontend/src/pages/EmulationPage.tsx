@@ -14,6 +14,8 @@ import {
   FileText,
   ChevronDown,
   ChevronUp,
+  Save,
+  BookOpen,
 } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -27,6 +29,9 @@ import {
   getSessionStatus,
   getSessionLogs,
   buildEmulationTerminalURL,
+  listPresets,
+  createPreset,
+  deletePreset,
 } from '@/api/emulation'
 import { getFirmware } from '@/api/firmware'
 import KernelManager from '@/components/emulation/KernelManager'
@@ -35,6 +40,7 @@ import type {
   EmulationMode,
   EmulationStatus,
   PortForward,
+  EmulationPreset,
 } from '@/types'
 import '@xterm/xterm/css/xterm.css'
 
@@ -66,6 +72,14 @@ export default function EmulationPage() {
   const [firmwareArch, setFirmwareArch] = useState<string | null>(null)
   const [firmwareKernelPath, setFirmwareKernelPath] = useState<string | null>(null)
   const [initPath, setInitPath] = useState('')
+  const [preInitScript, setPreInitScript] = useState('')
+
+  // Presets
+  const [presets, setPresets] = useState<EmulationPreset[]>([])
+  const [showSavePreset, setShowSavePreset] = useState(false)
+  const [presetName, setPresetName] = useState('')
+  const [presetDescription, setPresetDescription] = useState('')
+  const [savingPreset, setSavingPreset] = useState(false)
 
   // Active session + terminal
   const [activeSession, setActiveSession] = useState<EmulationSession | null>(null)
@@ -89,6 +103,16 @@ export default function EmulationPage() {
     }
   }, [projectId, activeSession])
 
+  const loadPresets = useCallback(async () => {
+    if (!projectId) return
+    try {
+      const data = await listPresets(projectId)
+      setPresets(data)
+    } catch {
+      // ignore
+    }
+  }, [projectId])
+
   // Pre-fill binary path from ?binary= query parameter
   useEffect(() => {
     const binary = searchParams.get('binary')
@@ -102,7 +126,8 @@ export default function EmulationPage() {
 
   useEffect(() => {
     loadSessions()
-  }, [loadSessions])
+    loadPresets()
+  }, [loadSessions, loadPresets])
 
   // Fetch firmware architecture for kernel selection
   useEffect(() => {
@@ -143,6 +168,7 @@ export default function EmulationPage() {
         port_forwards: mode === 'system' && portForwards.length > 0 ? portForwards : undefined,
         kernel_name: mode === 'system' && kernelName ? kernelName : undefined,
         init_path: mode === 'system' && initPath.trim() ? initPath.trim() : undefined,
+        pre_init_script: mode === 'system' && preInitScript.trim() ? preInitScript.trim() : undefined,
       })
       setActiveSession(session)
       if (session.status === 'running' || session.status === 'error') {
@@ -212,6 +238,53 @@ export default function EmulationPage() {
     setPortForwards(updated)
   }
 
+  const loadPresetIntoForm = (preset: EmulationPreset) => {
+    setMode(preset.mode)
+    setBinaryPath(preset.binary_path || '')
+    setArguments(preset.arguments || '')
+    setPortForwards(preset.port_forwards || [])
+    setKernelName(preset.kernel_name || null)
+    setInitPath(preset.init_path || '')
+    setPreInitScript(preset.pre_init_script || '')
+  }
+
+  const handleSavePreset = async () => {
+    if (!projectId || !presetName.trim()) return
+    setSavingPreset(true)
+    try {
+      await createPreset(projectId, {
+        name: presetName.trim(),
+        description: presetDescription.trim() || undefined,
+        mode,
+        binary_path: mode === 'user' ? binaryPath.trim() || undefined : undefined,
+        arguments: mode === 'user' && arguments_.trim() ? arguments_.trim() : undefined,
+        architecture: firmwareArch || undefined,
+        port_forwards: mode === 'system' && portForwards.length > 0 ? portForwards : undefined,
+        kernel_name: mode === 'system' && kernelName ? kernelName : undefined,
+        init_path: mode === 'system' && initPath.trim() ? initPath.trim() : undefined,
+        pre_init_script: mode === 'system' && preInitScript.trim() ? preInitScript.trim() : undefined,
+      })
+      setShowSavePreset(false)
+      setPresetName('')
+      setPresetDescription('')
+      await loadPresets()
+    } catch {
+      // ignore
+    } finally {
+      setSavingPreset(false)
+    }
+  }
+
+  const handleDeletePreset = async (presetId: string) => {
+    if (!projectId) return
+    try {
+      await deletePreset(projectId, presetId)
+      await loadPresets()
+    } catch {
+      // ignore
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -241,6 +314,46 @@ export default function EmulationPage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left panel — controls + session list */}
         <div className="w-96 shrink-0 overflow-y-auto border-r border-border p-4 space-y-6">
+          {/* Presets */}
+          {presets.length > 0 && (
+            <div className="space-y-2">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                <BookOpen className="mr-1.5 inline h-3.5 w-3.5" />
+                Presets
+              </h2>
+              {presets.map((preset) => (
+                <div
+                  key={preset.id}
+                  className="group flex items-center justify-between rounded-md border border-border px-3 py-2 hover:border-primary/50 transition-colors"
+                >
+                  <button
+                    onClick={() => loadPresetIntoForm(preset)}
+                    className="flex-1 text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{preset.name}</span>
+                      <Badge variant="outline" className="text-[10px]">
+                        {preset.mode}
+                      </Badge>
+                    </div>
+                    {preset.description && (
+                      <p className="mt-0.5 text-xs text-muted-foreground truncate">
+                        {preset.description}
+                      </p>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => handleDeletePreset(preset.id)}
+                    className="ml-2 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+                    title="Delete preset"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Start Emulation Form */}
           <div className="space-y-4">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
@@ -372,6 +485,21 @@ export default function EmulationPage() {
                   </div>
                 ))}
               </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Pre-Init Script
+                </label>
+                <textarea
+                  value={preInitScript}
+                  onChange={(e) => setPreInitScript(e.target.value)}
+                  placeholder={"# Runs before firmware init\nexport LD_PRELOAD=/opt/stubs/fake_mtd.so\n/bin/cfmd &\nsleep 1\n/bin/httpd &"}
+                  rows={5}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm font-mono focus:border-primary focus:outline-none resize-y"
+                />
+                <p className="mt-0.5 text-xs text-muted-foreground/60">
+                  Shell script sourced before firmware init (LD_PRELOAD, service startup, etc.)
+                </p>
+              </div>
               </>
             )}
 
@@ -382,18 +510,70 @@ export default function EmulationPage() {
               </div>
             )}
 
-            <Button
-              onClick={handleStart}
-              disabled={starting}
-              className="w-full"
-            >
-              {starting ? (
-                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="mr-1.5 h-4 w-4" />
-              )}
-              {starting ? 'Starting...' : 'Start Emulation'}
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                onClick={handleStart}
+                disabled={starting}
+                className="flex-1"
+              >
+                {starting ? (
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="mr-1.5 h-4 w-4" />
+                )}
+                {starting ? 'Starting...' : 'Start'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setShowSavePreset(!showSavePreset)}
+                title="Save as preset"
+              >
+                <Save className="h-4 w-4" />
+              </Button>
+            </div>
+
+            {/* Save as Preset dialog */}
+            {showSavePreset && (
+              <div className="rounded-md border border-border bg-card p-3 space-y-2">
+                <p className="text-xs font-medium text-muted-foreground">Save current config as preset</p>
+                <input
+                  type="text"
+                  value={presetName}
+                  onChange={(e) => setPresetName(e.target.value)}
+                  placeholder="Preset name"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                />
+                <input
+                  type="text"
+                  value={presetDescription}
+                  onChange={(e) => setPresetDescription(e.target.value)}
+                  placeholder="Description (optional)"
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    onClick={handleSavePreset}
+                    disabled={savingPreset || !presetName.trim()}
+                    className="flex-1"
+                  >
+                    {savingPreset ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Save className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Save
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setShowSavePreset(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Session list */}

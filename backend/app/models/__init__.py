@@ -7,11 +7,12 @@ from app.models.document import Document
 from app.models.security_review import SecurityReview, ReviewAgent  # kept for DB/relationship integrity
 from app.models.sbom import SbomComponent, SbomVulnerability
 from app.models.emulation_session import EmulationSession
+from app.models.emulation_preset import EmulationPreset
 from app.models.fuzzing import FuzzingCampaign, FuzzingCrash
 
 __all__ = [
     "Project", "Firmware", "Conversation", "AnalysisCache",
     "Finding", "Document", "SecurityReview", "ReviewAgent",
     "SbomComponent", "SbomVulnerability", "EmulationSession",
-    "FuzzingCampaign", "FuzzingCrash",
+    "EmulationPreset", "FuzzingCampaign", "FuzzingCrash",
 ]

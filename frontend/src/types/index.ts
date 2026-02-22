@@ -283,6 +283,50 @@ export interface EmulationStartRequest {
   port_forwards?: PortForward[]
   kernel_name?: string
   init_path?: string
+  pre_init_script?: string
+}
+
+export interface EmulationPreset {
+  id: string
+  project_id: string
+  name: string
+  description: string | null
+  mode: EmulationMode
+  binary_path: string | null
+  arguments: string | null
+  architecture: string | null
+  port_forwards: PortForward[] | null
+  kernel_name: string | null
+  init_path: string | null
+  pre_init_script: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface EmulationPresetCreate {
+  name: string
+  description?: string
+  mode: EmulationMode
+  binary_path?: string
+  arguments?: string
+  architecture?: string
+  port_forwards?: PortForward[]
+  kernel_name?: string
+  init_path?: string
+  pre_init_script?: string
+}
+
+export interface EmulationPresetUpdate {
+  name?: string
+  description?: string
+  mode?: EmulationMode
+  binary_path?: string
+  arguments?: string
+  architecture?: string
+  port_forwards?: PortForward[]
+  kernel_name?: string
+  init_path?: string
+  pre_init_script?: string
 }
 
 // ── Kernel types ──

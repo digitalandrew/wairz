@@ -3,6 +3,9 @@ import type {
   EmulationSession,
   EmulationStartRequest,
   EmulationExecResponse,
+  EmulationPreset,
+  EmulationPresetCreate,
+  EmulationPresetUpdate,
 } from '@/types'
 
 export async function startEmulation(
@@ -75,4 +78,45 @@ export function buildEmulationTerminalURL(
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
   return `${proto}//${host}/api/v1/projects/${projectId}/emulation/${sessionId}/terminal`
+}
+
+// ── Emulation Presets ──
+
+export async function listPresets(
+  projectId: string,
+): Promise<EmulationPreset[]> {
+  const { data } = await apiClient.get<EmulationPreset[]>(
+    `/projects/${projectId}/emulation/presets`,
+  )
+  return data
+}
+
+export async function createPreset(
+  projectId: string,
+  request: EmulationPresetCreate,
+): Promise<EmulationPreset> {
+  const { data } = await apiClient.post<EmulationPreset>(
+    `/projects/${projectId}/emulation/presets`,
+    request,
+  )
+  return data
+}
+
+export async function updatePreset(
+  projectId: string,
+  presetId: string,
+  request: EmulationPresetUpdate,
+): Promise<EmulationPreset> {
+  const { data } = await apiClient.patch<EmulationPreset>(
+    `/projects/${projectId}/emulation/presets/${presetId}`,
+    request,
+  )
+  return data
+}
+
+export async function deletePreset(
+  projectId: string,
+  presetId: string,
+): Promise<void> {
+  await apiClient.delete(`/projects/${projectId}/emulation/presets/${presetId}`)
 }

@@ -14,6 +14,9 @@ from app.models.firmware import Firmware
 from app.schemas.emulation import (
     EmulationExecRequest,
     EmulationExecResponse,
+    EmulationPresetCreate,
+    EmulationPresetResponse,
+    EmulationPresetUpdate,
     EmulationSessionResponse,
     EmulationStartRequest,
 )
@@ -161,6 +164,94 @@ async def get_session_logs(
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     return {"logs": logs}
+
+
+# ── Emulation Presets ──
+
+
+@router.post("/presets", response_model=EmulationPresetResponse, status_code=201)
+async def create_preset(
+    project_id: uuid.UUID,
+    request: EmulationPresetCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new emulation preset."""
+    svc = EmulationService(db)
+    try:
+        preset = await svc.create_preset(
+            project_id=project_id,
+            name=request.name,
+            mode=request.mode,
+            description=request.description,
+            binary_path=request.binary_path,
+            arguments=request.arguments,
+            architecture=request.architecture,
+            port_forwards=[pf.model_dump() for pf in request.port_forwards],
+            kernel_name=request.kernel_name,
+            init_path=request.init_path,
+            pre_init_script=request.pre_init_script,
+        )
+        await db.commit()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return preset
+
+
+@router.get("/presets", response_model=list[EmulationPresetResponse])
+async def list_presets(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """List all emulation presets for this project."""
+    svc = EmulationService(db)
+    return await svc.list_presets(project_id)
+
+
+@router.get("/presets/{preset_id}", response_model=EmulationPresetResponse)
+async def get_preset(
+    project_id: uuid.UUID,
+    preset_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a single emulation preset."""
+    svc = EmulationService(db)
+    try:
+        return await svc.get_preset(preset_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@router.patch("/presets/{preset_id}", response_model=EmulationPresetResponse)
+async def update_preset(
+    project_id: uuid.UUID,
+    preset_id: uuid.UUID,
+    request: EmulationPresetUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an emulation preset."""
+    svc = EmulationService(db)
+    try:
+        updates = request.model_dump(exclude_unset=True)
+        preset = await svc.update_preset(preset_id, updates)
+        await db.commit()
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return preset
+
+
+@router.delete("/presets/{preset_id}", status_code=204)
+async def delete_preset(
+    project_id: uuid.UUID,
+    preset_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an emulation preset."""
+    svc = EmulationService(db)
+    try:
+        await svc.delete_preset(preset_id)
+        await db.commit()
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
 
 
 @router.websocket("/{session_id}/terminal")
