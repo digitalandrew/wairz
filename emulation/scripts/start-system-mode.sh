@@ -187,14 +187,24 @@ esac
 
 # Build networking with explicit NIC device per architecture.
 # Uses modern -device/-netdev syntax instead of legacy -net nic/-net user.
-# Port forwarding is appended to the -netdev user arg.
+# Port forwarding: QEMU SLiRP hostfwd only reliably handles connections from
+# 127.0.0.1, but Docker port proxies forward from the container's bridge IP.
+# Workaround: QEMU hostfwd listens on 127.0.0.1 with offset ports (+10000),
+# and socat relays on the original ports forward via localhost to QEMU.
 NETDEV_ARGS="user,id=net0"
+RELAY_PIDS=""
 if [ -n "$PORT_FORWARDS" ]; then
     IFS=',' read -ra PAIRS <<< "$PORT_FORWARDS"
     for pair in "${PAIRS[@]}"; do
         host_port="${pair%%:*}"
         guest_port="${pair##*:}"
-        NETDEV_ARGS="${NETDEV_ARGS},hostfwd=tcp::${host_port}-:${guest_port}"
+        relay_port=$((host_port + 10000))
+        NETDEV_ARGS="${NETDEV_ARGS},hostfwd=tcp:127.0.0.1:${relay_port}-:${guest_port}"
+        # Start socat relay: listens on all interfaces, forwards to QEMU via localhost
+        socat TCP-LISTEN:${host_port},bind=0.0.0.0,fork,reuseaddr \
+              TCP:127.0.0.1:${relay_port} &
+        RELAY_PIDS="$RELAY_PIDS $!"
+        echo "Port relay: 0.0.0.0:${host_port} → 127.0.0.1:${relay_port} → guest:${guest_port}"
     done
 fi
 NET_ARGS="-device ${NIC_DEVICE},netdev=net0 -netdev ${NETDEV_ARGS}"

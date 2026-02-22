@@ -186,6 +186,10 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "Use this for dynamic analysis: check running services, test credentials, "
             "inspect network configuration, run binaries with different inputs. "
             "Default timeout is 30 seconds, max 120 seconds. "
+            "IMPORTANT: This uses a serial console — keep commands simple and short. "
+            "Run ONE command per call. Do NOT use pipes (|), chaining (&&, ;), "
+            "backgrounding (&), or subshells — these are unreliable over serial "
+            "and often return empty output. Run separate tool calls instead. "
             "If a previous command is stuck (e.g., a foreground daemon), set "
             "send_ctrl_c=true to send Ctrl-C before executing the new command."
         ),

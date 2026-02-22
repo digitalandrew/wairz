@@ -4,8 +4,6 @@ def build_system_prompt(
     architecture: str | None,
     endianness: str | None,
     extracted_path: str,
-    documents: list[dict] | None = None,
-    wairz_md_content: str | None = None,
 ) -> str:
     """Build the system prompt for the AI firmware analyst."""
     arch_info = architecture or "unknown"
@@ -54,6 +52,16 @@ Emulation capabilities:
 - Use emulation to VALIDATE static findings: test if default credentials work, check if services are accessible, verify network behavior
 - Caveats: emulated firmware may behave differently than on real hardware (missing peripherals, different timing, no flash storage). Note these limitations when reporting findings
 - Always stop emulation sessions when done to free resources
+
+IMPORTANT — run_command_in_emulation uses a serial console, NOT a normal shell:
+- Keep commands simple and short. Run ONE command at a time.
+- Do NOT chain commands with pipes (|), logical operators (&&, ||), or semicolons (;).
+  These are unreliable over serial and often return empty output or exit code 1.
+- Do NOT use backgrounding (&) or subshells in commands.
+- If you need the output of one command to feed another, run them as separate tool calls
+  and process the results yourself.
+- Example: instead of `cat /etc/passwd | grep root`, run `cat /etc/passwd` and inspect
+  the output, or use `grep root /etc/passwd` as a single command.
 
 Emulation troubleshooting — follow this workflow when emulation fails:
 1. BEFORE starting: run diagnose_emulation_environment to check for known issues
@@ -105,35 +113,12 @@ Output format:
 - Always explain WHY something is a security concern, not just THAT it is
 - Rate findings: critical, high, medium, low, info
 
+IMPORTANT — First steps:
+- At the start of each session, call read_project_instructions to check for \
+project-specific instructions in the WAIRZ.md file. Follow any instructions \
+found there as they apply to your analysis.
+
 You have access to the tools defined in this conversation. Use them \
 to investigate as needed for the user's request."""
-
-    # Inject WAIRZ.md content directly into the system prompt
-    if wairz_md_content:
-        prompt += f"""
-
---- Project Instructions (WAIRZ.md) ---
-The project owner has provided the following custom instructions. \
-Follow these instructions as they apply to your analysis:
-
-{wairz_md_content}
---- End Project Instructions ---"""
-
-    if documents:
-        # Filter out WAIRZ.md from the document list (already injected above)
-        other_docs = [
-            doc for doc in documents
-            if doc.get("filename", "").upper() != "WAIRZ.MD"
-        ]
-        if other_docs:
-            doc_lines = ["\n\nProject Documents:"]
-            doc_lines.append(
-                "The following supplementary documents have been uploaded to this project. "
-                "Use the read_project_document tool with the document ID to read their contents."
-            )
-            for doc in other_docs:
-                desc = f" — {doc['description']}" if doc.get("description") else ""
-                doc_lines.append(f"- {doc['filename']}{desc} (ID: {doc['id']})")
-            prompt += "\n".join(doc_lines)
 
     return prompt

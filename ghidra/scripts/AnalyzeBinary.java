@@ -18,6 +18,8 @@ import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressIterator;
+import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.lang.Language;
 import ghidra.program.model.lang.Endian;
 import ghidra.program.model.listing.*;

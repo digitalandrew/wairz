@@ -68,7 +68,8 @@ export default function HelpPage() {
           </ol>
           <p>
             Use the sidebar to navigate between projects and their sub-pages
-            (Overview, File Explorer, Findings).
+            (Overview, File Explorer, Findings, Component Map, SBOM,
+            Emulation, Fuzzing).
           </p>
         </Section>
 
@@ -88,8 +89,8 @@ export default function HelpPage() {
             </li>
             <li>
               <strong>Delete:</strong> Use the delete button on the project
-              Overview page. This removes the project, firmware data, findings,
-              and conversations.
+              Overview page. This removes the project, firmware data, and
+              findings.
             </li>
           </ul>
         </Section>
@@ -136,13 +137,24 @@ export default function HelpPage() {
               directly in the browser.
             </li>
             <li>
-              <strong>WAIRZ.md:</strong> A special document that provides
-              project-specific instructions to the AI assistant. Edit it to
-              guide the AI's focus and methodology.
+              <strong>WAIRZ.md:</strong> A special document created
+              automatically for each project. The AI assistant reads it via
+              the{' '}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                read_project_instructions
+              </code>{' '}
+              tool at the start of each session. Edit it to provide
+              project-specific instructions, analysis focus areas, and
+              context.
             </li>
             <li>
-              <strong>File Explorer viewing:</strong> Documents appear in the
-              file explorer and can be viewed inline.
+              <strong>AI access:</strong> The AI can read any project document
+              using the{' '}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                read_project_document
+              </code>{' '}
+              tool. Upload scope documents, prior reports, or datasheets for
+              reference during analysis.
             </li>
           </ul>
         </Section>
@@ -205,66 +217,149 @@ export default function HelpPage() {
           </ul>
         </Section>
 
-        <Section title="AI Chat Assistant">
+        <Section title="AI Assistant (MCP)">
           <p className="mb-3">
-            The AI assistant (powered by Claude) can analyze firmware using
-            built-in tools for file inspection, string analysis, binary
-            analysis, and security assessment.
+            The AI assistant connects via MCP (Model Context Protocol) using
+            Claude Code or Claude Desktop. It has access to 40+ tools for
+            filesystem inspection, string analysis, binary analysis, security
+            assessment, SBOM, emulation, and fuzzing.
           </p>
           <ul className="list-inside list-disc space-y-1">
             <li>
-              <strong>Starting a conversation:</strong> Open the chat panel from
-              the File Explorer or Findings page. Each conversation is saved and
-              can be resumed.
+              <strong>Setup:</strong> Register the MCP server with your Claude
+              client:
+              <pre className="mt-1 rounded bg-muted px-2 py-1.5 text-xs font-mono overflow-x-auto">
+                claude mcp add wairz -- docker exec -i wairz-backend-1 uv run
+                wairz-mcp --project-id {'<PROJECT_ID>'}
+              </pre>
             </li>
             <li>
-              <strong>Model selection:</strong> Choose between available Claude
-              models depending on your analysis needs.
+              <strong>Project instructions:</strong> The AI reads your WAIRZ.md
+              at the start of each session via the{' '}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                read_project_instructions
+              </code>{' '}
+              tool. Edit WAIRZ.md from the project Overview to customize the
+              AI's behavior.
             </li>
             <li>
-              <strong>Tool calls:</strong> The AI uses tools automatically
-              (listing directories, reading files, extracting strings, checking
-              protections, etc.). Tool calls appear as collapsible blocks in the
-              chat &mdash; expand them to see inputs and outputs.
-            </li>
-            <li>
-              <strong>Streaming:</strong> Responses stream in real-time so you
-              can follow the AI's reasoning as it works.
+              <strong>Tools:</strong> The AI uses tools autonomously &mdash;
+              listing directories, reading files, extracting strings, analyzing
+              binaries, checking security configurations, running emulation, and
+              more.
             </li>
             <li>
               <strong>Findings:</strong> When the AI discovers security issues,
-              it can record them as formal findings using the{' '}
+              it records them as formal findings using the{' '}
               <code className="rounded bg-muted px-1 py-0.5 text-xs">
                 add_finding
               </code>{' '}
-              tool.
+              tool. These appear on the Findings page.
             </li>
           </ul>
         </Section>
 
-        <Section title="Autonomous Security Review">
+        <Section title="Component Map">
           <p className="mb-3">
-            Run comprehensive automated security reviews using multiple
-            specialized AI agents.
+            Visualize firmware component dependencies as an interactive graph.
           </p>
           <ul className="list-inside list-disc space-y-1">
             <li>
-              <strong>Review categories:</strong> Select from categories like
-              hardcoded credentials, binary protections, network services, file
-              permissions, crypto material, and more.
+              <strong>Dependency graph:</strong> Shows ELF binary dependencies
+              (DT_NEEDED), shell script calls, init script service mappings,
+              and config-to-binary references.
             </li>
             <li>
-              <strong>Multi-agent:</strong> Multiple AI agents work in parallel,
-              each focused on a specific review category.
+              <strong>Node types:</strong> Color-coded by type &mdash; binaries
+              (blue), libraries (purple), scripts (green), config files
+              (orange), init scripts (yellow), kernel modules (red).
             </li>
             <li>
-              <strong>Monitoring:</strong> Track progress of each agent in
-              real-time from the review panel.
+              <strong>Interaction:</strong> Pan, zoom, and click nodes for
+              details. Clusters can be collapsed for large graphs.
             </li>
             <li>
-              <strong>Results:</strong> Findings from autonomous reviews appear
-              in the Findings page alongside manually-created and chat-created
-              findings.
+              <strong>Export:</strong> Save the map as PNG, SVG, or JSON.
+            </li>
+          </ul>
+        </Section>
+
+        <Section title="SBOM & Vulnerability Scanning">
+          <p className="mb-3">
+            Generate a Software Bill of Materials and scan for known
+            vulnerabilities.
+          </p>
+          <ul className="list-inside list-disc space-y-1">
+            <li>
+              <strong>SBOM generation:</strong> Identifies software components
+              using package manager databases, kernel version, library SONAME,
+              binary version strings, and config file hints.
+            </li>
+            <li>
+              <strong>Vulnerability scan:</strong> Checks identified components
+              against the NVD (National Vulnerability Database) for known CVEs.
+            </li>
+            <li>
+              <strong>Dashboard:</strong> View component counts, severity
+              breakdown, and CVE details with links to NVD entries.
+            </li>
+            <li>
+              <strong>Export:</strong> Download the SBOM in CycloneDX JSON
+              format.
+            </li>
+            <li>
+              <strong>Findings:</strong> Vulnerability scan results are
+              automatically created as findings with source "sbom_scan."
+            </li>
+          </ul>
+        </Section>
+
+        <Section title="Emulation">
+          <p className="mb-3">
+            Run firmware in QEMU for dynamic analysis. Supports ARM, MIPS, and
+            x86 architectures.
+          </p>
+          <ul className="list-inside list-disc space-y-1">
+            <li>
+              <strong>User mode:</strong> Run a single binary in a chroot
+              environment. Fast and good for testing specific programs.
+            </li>
+            <li>
+              <strong>System mode:</strong> Boot the full firmware OS with a
+              pre-built Linux kernel. Good for testing services and network
+              behavior. Requires a matching kernel (manage via the Kernels
+              panel).
+            </li>
+            <li>
+              <strong>Terminal:</strong> Interactive terminal via xterm.js for
+              running commands in the emulated environment.
+            </li>
+            <li>
+              <strong>Session management:</strong> Start, stop, and monitor
+              emulation sessions. View boot logs for troubleshooting.
+            </li>
+          </ul>
+        </Section>
+
+        <Section title="Fuzzing">
+          <p className="mb-3">
+            Automated crash discovery using AFL++ in QEMU mode.
+          </p>
+          <ul className="list-inside list-disc space-y-1">
+            <li>
+              <strong>Target analysis:</strong> Analyze a binary to assess its
+              fuzzing suitability based on input handling, dangerous function
+              usage, and binary protections.
+            </li>
+            <li>
+              <strong>Campaign management:</strong> Create, start, and stop
+              fuzzing campaigns. Monitor real-time stats including
+              executions/sec, paths found, and crashes.
+            </li>
+            <li>
+              <strong>Crash triage:</strong> View crash inputs, stack traces,
+              and exploitability classification. Create findings directly from
+              triaged crashes.
             </li>
           </ul>
         </Section>
@@ -300,10 +395,6 @@ export default function HelpPage() {
             <div className="grid grid-cols-[120px_1fr] gap-y-1.5">
               <Kbd>Ctrl + F</Kbd>
               <span>Search within the current file in the code viewer</span>
-              <Kbd>Shift + Enter</Kbd>
-              <span>Insert a newline in the chat input</span>
-              <Kbd>Enter</Kbd>
-              <span>Send a chat message</span>
             </div>
           </div>
         </Section>

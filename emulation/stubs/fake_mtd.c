@@ -35,11 +35,18 @@ typedef long ssize_t;
 typedef unsigned int mode_t;
 typedef long off_t;
 
-extern int open(const char *pathname, int flags, ...);
+/* Note: open() is now defined locally as a tracing wrapper.
+ * We call the real kernel open via _raw_open() syscall. */
 extern ssize_t read(int fd, void *buf, unsigned long count);
 extern ssize_t write(int fd, const void *buf, unsigned long count);
 extern int close(int fd);
 extern off_t lseek(int fd, off_t offset, int whence);
+
+/*
+ * errno access — __errno_location() is provided by glibc, musl, and uclibc.
+ * Returns a pointer to the thread-local errno variable.
+ */
+extern int *__errno_location(void);
 
 /* ----- platform-specific constants ----- */
 /*
@@ -67,29 +74,52 @@ extern off_t lseek(int fd, off_t offset, int whence);
  */
 
 #if defined(__mips__) && !defined(__mips64)
-/* MIPS o32 ABI: syscall number in $v0, args in $a0-$a2, error flag in $a3 */
+/*
+ * MIPS o32 ABI: syscall number in $v0, args in $a0-$a3, error flag in $a3.
+ *
+ * Critical: the syscall number MUST be loaded inside the asm block via
+ * an immediate `li` instruction (matching glibc's approach). Loading it
+ * via a register variable before the asm block is unreliable — GCC may
+ * clobber $v0 while generating code to load $a0-$a2 from the stack frame.
+ *
+ * After `syscall`:
+ *   - $a3 == 0: success, $v0 = return value
+ *   - $a3 != 0: error, $v0 = errno value (NOT negated like ARM/x86)
+ */
 #define __NR_ioctl 4054
 
 static long _raw_ioctl(int fd, unsigned long request, void *arg)
 {
-    register long v0 __asm__("$2") = __NR_ioctl;
     register long a0 __asm__("$4") = (long)fd;
     register long a1 __asm__("$5") = (long)request;
     register long a2 __asm__("$6") = (long)arg;
+    register long v0 __asm__("$2");
     register long a3 __asm__("$7");
+    long ret;
+    long err;
     __asm__ volatile(
-        "syscall"
-        : "+r"(v0), "=r"(a3)
-        : "r"(a0), "r"(a1), "r"(a2)
+        ".set noreorder\n\t"
+        "li $2, %2\n\t"
+        "syscall\n\t"
+        ".set reorder"
+        : "=r"(v0), "=r"(a3)
+        : "i"(__NR_ioctl), "r"(a0), "r"(a1), "r"(a2)
         : "memory", "$1", "$3", "$8", "$9", "$10", "$11", "$12",
           "$13", "$14", "$15", "$24", "$25", "hi", "lo"
     );
-    if (a3 != 0) return -1;
-    return v0;
+    /* Save to stack variables immediately — the register-pinned variables
+     * v0 ($2) and a3 ($7) would be clobbered by any function call. */
+    ret = v0;
+    err = a3;
+    if (err != 0) {
+        *__errno_location() = (int)ret;
+        return -1;
+    }
+    return ret;
 }
 
 #elif defined(__arm__)
-/* ARM EABI: syscall number in r7, args in r0-r2 */
+/* ARM EABI: syscall number in r7, args in r0-r2, returns -errno in r0 on error */
 #define __NR_ioctl 54
 
 static long _raw_ioctl(int fd, unsigned long request, void *arg)
@@ -98,18 +128,25 @@ static long _raw_ioctl(int fd, unsigned long request, void *arg)
     register long r1 __asm__("r1") = (long)request;
     register long r2 __asm__("r2") = (long)arg;
     register long r7 __asm__("r7") = __NR_ioctl;
+    long ret;
     __asm__ volatile(
         "swi #0"
         : "+r"(r0)
         : "r"(r1), "r"(r2), "r"(r7)
         : "memory"
     );
+    /* Save to stack var before any function call clobbers r0 */
+    ret = r0;
     /* ARM returns -errno on error (negative value) */
-    return r0;
+    if (ret < 0 && ret > -4096) {
+        *__errno_location() = (int)(-ret);
+        return -1;
+    }
+    return ret;
 }
 
 #elif defined(__aarch64__)
-/* AArch64: syscall number in x8, args in x0-x2 */
+/* AArch64: syscall number in x8, args in x0-x2, returns -errno in x0 on error */
 #define __NR_ioctl 29
 
 static long _raw_ioctl(int fd, unsigned long request, void *arg)
@@ -118,18 +155,236 @@ static long _raw_ioctl(int fd, unsigned long request, void *arg)
     register long x1 __asm__("x1") = (long)request;
     register long x2 __asm__("x2") = (long)arg;
     register long x8 __asm__("x8") = __NR_ioctl;
+    long ret;
     __asm__ volatile(
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
         : "memory"
     );
-    return x0;
+    /* Save to stack var before any function call clobbers x0 */
+    ret = x0;
+    /* AArch64 returns -errno on error (negative value) */
+    if (ret < 0 && ret > -4096) {
+        *__errno_location() = (int)(-ret);
+        return -1;
+    }
+    return ret;
 }
 
 #else
 #error "Unsupported architecture for raw ioctl syscall"
 #endif
+
+/* ===== Raw open/write/close syscalls for tracing ===== */
+
+#if defined(__mips__) && !defined(__mips64)
+#define __NR_open  4005
+#define __NR_write 4004
+#define __NR_close 4006
+#define _O_APPEND 0x0008
+#elif defined(__arm__)
+#define __NR_open  5
+#define __NR_write 4
+#define __NR_close 6
+#define _O_APPEND 0x0400
+#elif defined(__aarch64__)
+/* aarch64 doesn't have open, uses openat (56) with AT_FDCWD=-100 */
+#define __NR_openat 56
+#define __NR_write  64
+#define __NR_close  57
+#define _O_APPEND   0x0400
+#define AT_FDCWD    -100
+#endif
+
+#if defined(__mips__) && !defined(__mips64)
+static int _raw_open(const char *path, int flags, int mode)
+{
+    register long a0 __asm__("$4") = (long)path;
+    register long a1 __asm__("$5") = (long)flags;
+    register long a2 __asm__("$6") = (long)mode;
+    register long v0 __asm__("$2");
+    register long a3 __asm__("$7");
+    long ret, err;
+    __asm__ volatile(
+        ".set noreorder\n\t"
+        "li $2, %2\n\t"
+        "syscall\n\t"
+        ".set reorder"
+        : "=r"(v0), "=r"(a3)
+        : "i"(__NR_open), "r"(a0), "r"(a1), "r"(a2)
+        : "memory", "$1", "$3", "$8", "$9", "$10", "$11", "$12",
+          "$13", "$14", "$15", "$24", "$25", "hi", "lo"
+    );
+    ret = v0; err = a3;
+    if (err != 0) { *__errno_location() = (int)ret; return -1; }
+    return (int)ret;
+}
+
+static long _raw_write(int fd, const void *buf, unsigned long count)
+{
+    register long a0 __asm__("$4") = (long)fd;
+    register long a1 __asm__("$5") = (long)buf;
+    register long a2 __asm__("$6") = (long)count;
+    register long v0 __asm__("$2");
+    register long a3 __asm__("$7");
+    long ret, err;
+    __asm__ volatile(
+        ".set noreorder\n\t"
+        "li $2, %2\n\t"
+        "syscall\n\t"
+        ".set reorder"
+        : "=r"(v0), "=r"(a3)
+        : "i"(__NR_write), "r"(a0), "r"(a1), "r"(a2)
+        : "memory", "$1", "$3", "$8", "$9", "$10", "$11", "$12",
+          "$13", "$14", "$15", "$24", "$25", "hi", "lo"
+    );
+    ret = v0; err = a3;
+    if (err != 0) return -1;
+    return ret;
+}
+
+static int _raw_close(int fd)
+{
+    register long a0 __asm__("$4") = (long)fd;
+    register long v0 __asm__("$2");
+    register long a3 __asm__("$7");
+    long ret, err;
+    __asm__ volatile(
+        ".set noreorder\n\t"
+        "li $2, %2\n\t"
+        "syscall\n\t"
+        ".set reorder"
+        : "=r"(v0), "=r"(a3)
+        : "i"(__NR_close), "r"(a0)
+        : "memory", "$1", "$3", "$8", "$9", "$10", "$11", "$12",
+          "$13", "$14", "$15", "$24", "$25", "hi", "lo"
+    );
+    ret = v0; err = a3;
+    if (err != 0) return -1;
+    return (int)ret;
+}
+
+#elif defined(__arm__)
+static int _raw_open(const char *path, int flags, int mode)
+{
+    register long r0 __asm__("r0") = (long)path;
+    register long r1 __asm__("r1") = (long)flags;
+    register long r2 __asm__("r2") = (long)mode;
+    register long r7 __asm__("r7") = __NR_open;
+    long ret;
+    __asm__ volatile("swi #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r7) : "memory");
+    ret = r0;
+    if (ret < 0 && ret > -4096) { *__errno_location() = (int)(-ret); return -1; }
+    return (int)ret;
+}
+
+static long _raw_write(int fd, const void *buf, unsigned long count)
+{
+    register long r0 __asm__("r0") = (long)fd;
+    register long r1 __asm__("r1") = (long)buf;
+    register long r2 __asm__("r2") = (long)count;
+    register long r7 __asm__("r7") = __NR_write;
+    long ret;
+    __asm__ volatile("swi #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r7) : "memory");
+    ret = r0;
+    if (ret < 0 && ret > -4096) return -1;
+    return ret;
+}
+
+static int _raw_close(int fd)
+{
+    register long r0 __asm__("r0") = (long)fd;
+    register long r7 __asm__("r7") = __NR_close;
+    long ret;
+    __asm__ volatile("swi #0" : "+r"(r0) : "r"(r7) : "memory");
+    ret = r0;
+    if (ret < 0 && ret > -4096) return -1;
+    return (int)ret;
+}
+
+#elif defined(__aarch64__)
+static int _raw_open(const char *path, int flags, int mode)
+{
+    register long x0 __asm__("x0") = AT_FDCWD;
+    register long x1 __asm__("x1") = (long)path;
+    register long x2 __asm__("x2") = (long)flags;
+    register long x3 __asm__("x3") = (long)mode;
+    register long x8 __asm__("x8") = __NR_openat;
+    long ret;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory");
+    ret = x0;
+    if (ret < 0 && ret > -4096) { *__errno_location() = (int)(-ret); return -1; }
+    return (int)ret;
+}
+
+static long _raw_write(int fd, const void *buf, unsigned long count)
+{
+    register long x0 __asm__("x0") = (long)fd;
+    register long x1 __asm__("x1") = (long)buf;
+    register long x2 __asm__("x2") = (long)count;
+    register long x8 __asm__("x8") = __NR_write;
+    long ret;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory");
+    ret = x0;
+    if (ret < 0 && ret > -4096) return -1;
+    return ret;
+}
+
+static int _raw_close(int fd)
+{
+    register long x0 __asm__("x0") = (long)fd;
+    register long x8 __asm__("x8") = __NR_close;
+    long ret;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    ret = x0;
+    if (ret < 0 && ret > -4096) return -1;
+    return (int)ret;
+}
+#endif
+
+/* Helper: compare string prefix */
+static int _str_starts_with(const char *s, const char *prefix)
+{
+    while (*prefix) {
+        if (*s != *prefix) return 0;
+        s++; prefix++;
+    }
+    return 1;
+}
+
+/* Helper: string length */
+static int _str_len(const char *s)
+{
+    int n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+/* ===== open() wrapper: traces /proc accesses ===== */
+int open(const char *pathname, int flags, ...)
+{
+    int mode = 0;
+    __builtin_va_list ap;
+    __builtin_va_start(ap, flags);
+    mode = __builtin_va_arg(ap, int);
+    __builtin_va_end(ap);
+
+    int fd = _raw_open(pathname, flags, mode);
+
+    /* Log any /proc access to /tmp/open_trace.log */
+    if (_str_starts_with(pathname, "/proc/")) {
+        int log_fd = _raw_open("/tmp/open_trace.log",
+                               _O_WRONLY | _O_CREAT | _O_APPEND, 0644);
+        if (log_fd >= 0) {
+            _raw_write(log_fd, pathname, _str_len(pathname));
+            _raw_write(log_fd, "\n", 1);
+            _raw_close(log_fd);
+        }
+    }
+
+    return fd;
+}
 
 /* ===== ioctl wrapper ===== */
 /*
@@ -181,13 +436,6 @@ static void _str_copy(char *dst, const char *src)
     while (*src)
         *dst++ = *src++;
     *dst = '\0';
-}
-
-static int _str_len(const char *s)
-{
-    int n = 0;
-    while (*s++) n++;
-    return n;
 }
 
 /*
@@ -409,16 +657,69 @@ int flash_unlock(int fd)
     return 0;
 }
 
+/* ===== Firmware startup stubs ===== */
+
+/*
+ * ifaddrs_get_lan_ifname(void) → char *
+ * Original calls iof_eth_name_get(0) from libiofdrv.so which reads
+ * the LAN interface name from hardware-specific driver configuration.
+ * In QEMU, the I/O framework driver doesn't work. Returns "br0" which
+ * is the expected bridge interface name (pre-init script renames eth0→br0).
+ */
+static char _lan_ifname[] = "br0";
+char *ifaddrs_get_lan_ifname(void)
+{
+    return _lan_ifname;
+}
+
+/*
+ * GetConutryCode(void) → int
+ * Original uses wireless extension ioctls on wlan interfaces to read
+ * the WiFi country code from the radio driver. In QEMU there are no
+ * wlan interfaces, so the ioctl calls fail or return empty data.
+ * Returns 0 (success) to bypass the check. Sets global country state
+ * to a safe default.
+ */
+int GetConutryCode(void)
+{
+    return 0;
+}
+
+/*
+ * tpi_wifi_get_channel_list_by_country(void *buf, ...) → int
+ * Related to GetConutryCode — retrieves WiFi channel list for a country.
+ * Returns 0 (success, empty list).
+ */
+int tpi_wifi_get_channel_list_by_country(void)
+{
+    return 0;
+}
+
 /* ===== Process monitor stubs ===== */
 
 /*
- * monitor_system_network_ok(void) → void
- * Called by cfmd to signal the process monitor via /var/pm_socket.
- * Without the monitor daemon, the connect() fails. No-op stub.
+ * proc_check_app(const char *name) → int
+ * Original scans /proc/PID/stat for a matching process name.
+ * Returns 1 if found, 0 if not.
+ * httpd calls this in a startup loop waiting for other daemons
+ * (netctrl, etc.) that may not run under QEMU emulation.
+ * Stub: always return 1 (process found) to bypass the wait loop.
  */
-void monitor_system_network_ok(void)
+int proc_check_app(const char *name)
 {
-    return;
+    (void)name;
+    return 1;
+}
+
+/*
+ * monitor_system_network_ok(void) → int
+ * Called by cfmd/httpd to check or signal that the network is ready.
+ * The original connects to the process monitor via /var/pm_socket.
+ * Returns 1 (network OK) so callers don't enter wait/retry loops.
+ */
+int monitor_system_network_ok(void)
+{
+    return 1;
 }
 
 /*

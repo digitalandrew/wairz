@@ -62,7 +62,12 @@ def _map_architecture(ghidra_arch: str) -> str:
 
 
 def _parse_analysis_output(raw_output: str) -> dict | None:
-    """Extract JSON from Ghidra AnalyzeBinary.java output between markers."""
+    """Extract JSON from Ghidra AnalyzeBinary.java output between markers.
+
+    Ghidra wraps println() output with log prefixes like:
+      INFO  AnalyzeBinary.java> {json...} (GhidraScript)
+    So we extract the outermost { ... } between the markers.
+    """
     start = raw_output.find(_START_MARKER)
     end = raw_output.find(_END_MARKER)
 
@@ -73,8 +78,17 @@ def _parse_analysis_output(raw_output: str) -> dict | None:
     if not content:
         return None
 
+    # Find the outermost JSON object braces within the content
+    json_start = content.find("{")
+    json_end = content.rfind("}")
+    if json_start == -1 or json_end == -1 or json_end <= json_start:
+        logger.error("No JSON object found between analysis markers")
+        return None
+
+    json_str = content[json_start:json_end + 1]
+
     try:
-        return json.loads(content)
+        return json.loads(json_str)
     except json.JSONDecodeError as exc:
         logger.error("Failed to parse Ghidra analysis JSON: %s", exc)
         return None

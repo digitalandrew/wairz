@@ -1,10 +1,29 @@
 import uuid
 
+from sqlalchemy import select
+
 from app.ai.tool_registry import ToolContext, ToolRegistry
+from app.models.document import Document
 from app.services.document_service import DocumentService
 
 
 def register_document_tools(registry: ToolRegistry) -> None:
+    registry.register(
+        name="read_project_instructions",
+        description=(
+            "Read the WAIRZ.md project instructions file. "
+            "This file contains project-specific instructions, context, and notes "
+            "provided by the user to guide your analysis. "
+            "You should call this tool at the start of each session to check for "
+            "any special instructions before beginning work."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        handler=_handle_read_instructions,
+    )
+
     registry.register(
         name="list_project_documents",
         description=(
@@ -37,6 +56,29 @@ def register_document_tools(registry: ToolRegistry) -> None:
             "required": ["document_id"],
         },
         handler=_handle_read_document,
+    )
+
+
+async def _handle_read_instructions(input: dict, context: ToolContext) -> str:
+    result = await context.db.execute(
+        select(Document).where(
+            Document.project_id == context.project_id,
+            Document.original_filename == "WAIRZ.md",
+        )
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        return (
+            "No WAIRZ.md instructions file found for this project. "
+            "The user has not provided any project-specific instructions."
+        )
+
+    content = DocumentService.read_text_content(document)
+    return (
+        "=== Project Instructions (WAIRZ.md) ===\n\n"
+        f"{content}\n\n"
+        "=== End Project Instructions ===\n\n"
+        "Follow these instructions as they apply to your analysis."
     )
 
 
