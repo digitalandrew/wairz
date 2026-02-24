@@ -189,6 +189,7 @@ async def run_ghidra_subprocess(
             known_markers = (
                 _START_MARKER, _DECOMPILE_START,
                 "===STRING_REFS_START===", "===TAINT_START===",
+                "===STACK_LAYOUT_START===", "===GLOBAL_LAYOUT_START===",
             )
             has_output = any(m in stdout_text for m in known_markers)
             if not has_output:
@@ -267,7 +268,7 @@ class GhidraAnalysisCache:
             AnalysisCache.operation == operation,
         )
         result = await db.execute(stmt)
-        row = result.scalar_one_or_none()
+        row = result.scalars().first()
         if row is not None and isinstance(row, dict):
             return row
         return None
@@ -295,7 +296,20 @@ class GhidraAnalysisCache:
         result_data: dict,
         db: AsyncSession,
     ) -> None:
-        """Store a result in the cache."""
+        """Store a result in the cache.
+
+        Deletes any existing entries with the same composite key first
+        to prevent duplicate rows.
+        """
+        from sqlalchemy import delete
+
+        await db.execute(
+            delete(AnalysisCache).where(
+                AnalysisCache.firmware_id == firmware_id,
+                AnalysisCache.binary_sha256 == binary_sha256,
+                AnalysisCache.operation == operation,
+            )
+        )
         cache_entry = AnalysisCache(
             firmware_id=firmware_id,
             binary_path=binary_path,
@@ -518,15 +532,38 @@ class GhidraAnalysisCache:
         firmware_id: uuid.UUID,
         db: AsyncSession,
     ) -> list[dict]:
-        """Get cross-references to a function/symbol."""
+        """Get cross-references to a function/symbol.
+
+        First checks for direct 'to' xrefs under the target name. If none
+        found (common for imported symbols like doSystemCmd, system, etc.),
+        performs a reverse scan of all functions' outgoing ('from') xrefs to
+        find callers whose 'to_func' matches the target.
+        """
         binary_sha256 = await self.ensure_analysis(binary_path, firmware_id, db)
 
         cached = await self._get_cached(firmware_id, binary_sha256, "xrefs", db)
-        if cached:
-            xrefs = cached.get("xrefs", {})
-            func_xrefs = xrefs.get(target, {})
-            return func_xrefs.get("to", [])
-        return []
+        if not cached:
+            return []
+
+        xrefs = cached.get("xrefs", {})
+
+        # Direct lookup
+        func_xrefs = xrefs.get(target, {})
+        direct_results = func_xrefs.get("to", [])
+        if direct_results:
+            return direct_results
+
+        # Reverse scan: check all functions' outgoing xrefs for calls to target
+        reverse_results: list[dict] = []
+        for func_name, func_data in xrefs.items():
+            for ref in func_data.get("from", []):
+                if ref.get("to_func") == target:
+                    reverse_results.append({
+                        "from": ref.get("from", ref.get("address", "unknown")),
+                        "type": ref.get("type", "CALL"),
+                        "from_func": func_name,
+                    })
+        return reverse_results
 
     async def get_xrefs_from(
         self,

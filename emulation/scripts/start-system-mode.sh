@@ -238,6 +238,7 @@ echo "Kernel append: $APPEND_ARGS"
 # Launch QEMU
 # -nodefaults: suppress audio/USB/etc warnings
 # -no-reboot: exit instead of rebooting (prevents infinite loops)
+# -gdb tcp::1234: expose GDB stub for remote debugging
 exec "$QEMU_BIN" \
     -M "$MACHINE" \
     $CPU_ARGS \
@@ -247,6 +248,7 @@ exec "$QEMU_BIN" \
     -no-reboot \
     -serial "unix:${SERIAL_SOCK},server,nowait" \
     -monitor none \
+    -gdb tcp::1234 \
     -kernel "$KERNEL" \
     $INITRD_ARGS \
     -drive "file=$ROOTFS_IMG,format=raw${DRIVE_IF}" \

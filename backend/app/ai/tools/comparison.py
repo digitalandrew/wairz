@@ -1,5 +1,6 @@
 """MCP tools for firmware version comparison."""
 
+import difflib
 import uuid
 
 from sqlalchemy import select
@@ -7,6 +8,7 @@ from sqlalchemy import select
 from app.ai.tool_registry import ToolContext, ToolRegistry
 from app.models.firmware import Firmware
 from app.services.comparison_service import diff_binary, diff_filesystems
+from app.services.ghidra_service import get_analysis_cache
 from app.utils.sandbox import validate_path
 from app.utils.truncation import truncate_output
 
@@ -181,6 +183,85 @@ async def _handle_diff_binary(input: dict, context: ToolContext) -> str:
     return truncate_output("\n".join(lines))
 
 
+async def _handle_diff_decompilation(input: dict, context: ToolContext) -> str:
+    """Decompile a function from two firmware versions and produce a unified diff."""
+    try:
+        fw_a_id = uuid.UUID(input["firmware_a_id"])
+        fw_b_id = uuid.UUID(input["firmware_b_id"])
+    except (KeyError, ValueError) as e:
+        return f"Error: invalid firmware IDs — {e}"
+
+    binary_path = input.get("binary_path", "")
+    function_name = input.get("function_name", "")
+    if not binary_path or not function_name:
+        return "Error: binary_path and function_name are required."
+
+    context_lines = input.get("context_lines", 5)
+
+    fw_a = await _get_firmware(fw_a_id, context)
+    if isinstance(fw_a, str):
+        return fw_a
+    fw_b = await _get_firmware(fw_b_id, context)
+    if isinstance(fw_b, str):
+        return fw_b
+
+    try:
+        path_a = validate_path(fw_a.extracted_path, binary_path)
+    except Exception:
+        return f"Error: binary not found in firmware A: {binary_path}"
+
+    try:
+        path_b = validate_path(fw_b.extracted_path, binary_path)
+    except Exception:
+        return f"Error: binary not found in firmware B: {binary_path}"
+
+    # Decompile from both versions
+    cache = get_analysis_cache()
+    try:
+        code_a = await cache.decompile_function(
+            path_a, function_name, fw_a.id, context.db,
+        )
+    except Exception as exc:
+        return f"Error decompiling from firmware A: {exc}"
+
+    try:
+        code_b = await cache.decompile_function(
+            path_b, function_name, fw_b.id, context.db,
+        )
+    except Exception as exc:
+        return f"Error decompiling from firmware B: {exc}"
+
+    # Generate unified diff
+    label_a = fw_a.version_label or fw_a.original_filename or str(fw_a.id)
+    label_b = fw_b.version_label or fw_b.original_filename or str(fw_b.id)
+
+    lines_a = code_a.splitlines(keepends=True)
+    lines_b = code_b.splitlines(keepends=True)
+
+    diff = list(difflib.unified_diff(
+        lines_a, lines_b,
+        fromfile=f"{binary_path}:{function_name} ({label_a})",
+        tofile=f"{binary_path}:{function_name} ({label_b})",
+        n=context_lines,
+    ))
+
+    if not diff:
+        return (
+            f"No differences in {function_name} between firmware versions.\n"
+            f"  A: {label_a}\n"
+            f"  B: {label_b}"
+        )
+
+    header = [
+        f"Decompilation Diff: {function_name}",
+        f"  A: {label_a}",
+        f"  B: {label_b}",
+        "",
+    ]
+    diff_text = "".join(diff)
+    return truncate_output("\n".join(header) + diff_text)
+
+
 async def _get_firmware(firmware_id: uuid.UUID, context: ToolContext):
     """Look up firmware by ID and verify project ownership. Returns firmware or error string."""
     stmt = select(Firmware).where(Firmware.id == firmware_id)
@@ -263,4 +344,43 @@ def register_comparison_tools(registry: ToolRegistry) -> None:
             "required": ["firmware_a_id", "firmware_b_id", "binary_path"],
         },
         handler=_handle_diff_binary,
+    )
+
+    registry.register(
+        name="diff_decompilation",
+        description=(
+            "Side-by-side decompilation diff: decompile the same function from "
+            "two firmware versions and produce a unified diff. Shows exactly what "
+            "changed in the pseudo-C code between versions. Useful for patch "
+            "analysis — understanding what the vendor fixed or modified. "
+            "Uses cached Ghidra decompilation (first call may take 1-3 minutes "
+            "per firmware version)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "firmware_a_id": {
+                    "type": "string",
+                    "description": "UUID of the first (older) firmware version",
+                },
+                "firmware_b_id": {
+                    "type": "string",
+                    "description": "UUID of the second (newer) firmware version",
+                },
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the binary within the firmware filesystem (e.g. '/bin/httpd')",
+                },
+                "function_name": {
+                    "type": "string",
+                    "description": "Function name to decompile and diff (e.g. 'formSetSysToolChangePwd')",
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Number of context lines around changes in the diff (default: 5)",
+                },
+            },
+            "required": ["firmware_a_id", "firmware_b_id", "binary_path", "function_name"],
+        },
+        handler=_handle_diff_decompilation,
     )

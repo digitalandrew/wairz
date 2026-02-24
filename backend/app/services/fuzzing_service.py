@@ -747,6 +747,18 @@ class FuzzingService:
             # Launch QEMU with -g (GDB server) on a known port, then connect
             # gdb-multiarch to get a backtrace.
             gdb_port = 12345
+
+            # Map firmware architecture to GDB architecture/endianness
+            GDB_ARCH_MAP = {
+                "arm": ("arm", "little"),
+                "aarch64": ("aarch64", "little"),
+                "mips": ("mips", "big"),
+                "mipsel": ("mips", "little"),
+                "x86": ("i386", "little"),
+                "x86_64": ("i386:x86-64", "little"),
+            }
+            gdb_arch, gdb_endian = GDB_ARCH_MAP.get(arch, ("arm", "little"))
+
             gdb_cmd = (
                 f"timeout 30 sh -c '"
                 f"QEMU_LD_PREFIX=/firmware "
@@ -755,6 +767,9 @@ class FuzzingService:
                 f" sleep 1 &&"
                 f" gdb-multiarch -batch"
                 f" -ex \"set confirm off\""
+                f" -ex \"set pagination off\""
+                f" -ex \"set architecture {gdb_arch}\""
+                f" -ex \"set endian {gdb_endian}\""
                 f" -ex \"target remote :{gdb_port}\""
                 f" -ex \"continue\""
                 f" -ex \"bt\""

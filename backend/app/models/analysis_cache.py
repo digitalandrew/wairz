@@ -32,5 +32,6 @@ class AnalysisCache(Base):
             "firmware_id",
             "binary_sha256",
             "operation",
+            unique=True,
         ),
     )

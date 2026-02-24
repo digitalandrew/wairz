@@ -264,7 +264,7 @@ class FirmwareMetadataService:
             ih_magic, ih_hcrc, ih_time, ih_size,
             ih_load, ih_ep, ih_dcrc, ih_os,
             ih_arch, ih_type, ih_comp,
-        ) = struct.unpack(">IIIIIIIBBBB", header_bytes[0:28])
+        ) = struct.unpack(">IIIIIIIBBBB", header_bytes[0:32])
 
         ih_name = header_bytes[32:64].split(b"\x00", 1)[0].decode("ascii", errors="replace")
 

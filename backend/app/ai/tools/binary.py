@@ -1,9 +1,11 @@
 """Binary analysis AI tools using Ghidra and pyelftools."""
 
+import difflib
 import hashlib
 import json
 import logging
 import os
+import re
 
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
@@ -30,6 +32,30 @@ _STRING_REFS_END = "===STRING_REFS_END==="
 _TAINT_START = "===TAINT_START==="
 _TAINT_END = "===TAINT_END==="
 
+# Markers for StackLayout.java output
+_STACK_LAYOUT_START = "===STACK_LAYOUT_START==="
+_STACK_LAYOUT_END = "===STACK_LAYOUT_END==="
+
+# Markers for GlobalLayout.java output
+_GLOBAL_LAYOUT_START = "===GLOBAL_LAYOUT_START==="
+_GLOBAL_LAYOUT_END = "===GLOBAL_LAYOUT_END==="
+
+# IPC function pairs for cross-binary dataflow analysis
+_IPC_PAIRS = {
+    "nvram": {
+        "writers": ["nvram_set", "nvram_commit", "nvram_bufset"],
+        "readers": ["nvram_get", "nvram_safe_get", "nvram_bufget"],
+    },
+    "config": {
+        "writers": ["SetValue", "cfg_set", "config_set", "set_config"],
+        "readers": ["GetValue", "cfg_get", "config_get", "get_config"],
+    },
+    "file": {
+        "writers": ["fwrite", "fprintf"],
+        "readers": ["fread", "fgets", "fopen"],
+    },
+}
+
 # Default source/sink functions for taint analysis
 _DEFAULT_SOURCES = [
     "websGetVar", "httpGetEnv", "getenv", "recv", "read", "fgets",
@@ -46,9 +72,51 @@ _DEFAULT_SINKS = [
 ]
 
 
+def _extract_ghidra_error(raw_output: str, script_name: str) -> str:
+    """Extract diagnostic info from Ghidra output when expected markers are missing.
+
+    Looks for ERROR, Exception, Usage, and other diagnostic lines to provide
+    actionable error info instead of a generic 'no parseable output' message.
+    """
+    diagnostic_lines: list[str] = []
+    for line in raw_output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if any(kw in lower for kw in (
+            "error", "exception", "usage:", "not found",
+            "invalid", "failed", "timeout", "unable",
+        )):
+            # Remove Ghidra log prefix if present (e.g. "INFO  Script> ...")
+            cleaned = stripped
+            for prefix in ("INFO  ", "WARN  ", "ERROR "):
+                if cleaned.startswith(prefix):
+                    cleaned = cleaned[len(prefix):]
+                    break
+            if cleaned not in diagnostic_lines:
+                diagnostic_lines.append(cleaned)
+
+    if not diagnostic_lines:
+        return (
+            f"Ghidra {script_name} produced no parseable output. "
+            "Possible causes: binary too large (timeout), unsupported format, "
+            "or incomplete Ghidra analysis. Try running on a smaller binary first."
+        )
+
+    # Cap at 10 lines
+    shown = diagnostic_lines[:10]
+    result = f"Ghidra {script_name} failed. Diagnostic output:\n\n"
+    result += "\n".join(f"  {line}" for line in shown)
+    if len(diagnostic_lines) > 10:
+        result += f"\n  ... ({len(diagnostic_lines) - 10} more diagnostic lines)"
+    return result
+
+
 async def _handle_list_functions(input: dict, context: ToolContext) -> str:
     """List functions found in a binary, sorted by size (largest first)."""
     path = validate_path(context.extracted_path, input["binary_path"])
+    limit = min(input.get("limit", 100), 500)
 
     cache = get_analysis_cache()
     functions = await cache.get_functions(path, context.firmware_id, context.db)
@@ -56,12 +124,22 @@ async def _handle_list_functions(input: dict, context: ToolContext) -> str:
     if not functions:
         return "No functions found in binary."
 
-    lines = [f"Found {len(functions)} function(s) (sorted by size, largest first):", ""]
-    for fn in functions:
+    total = len(functions)
+    shown = functions[:limit]
+
+    lines = [f"Found {total} function(s) (sorted by size, largest first):", ""]
+    for fn in shown:
         name = fn.get("name", "unknown")
         size = fn.get("size", 0)
         address = fn.get("address", "0")
         lines.append(f"  {address}  {size:>6} bytes  {name}")
+
+    if total > limit:
+        lines.append("")
+        lines.append(
+            f"  ... ({total - limit} more functions omitted. "
+            f"Use limit={min(total, 500)} to see more.)"
+        )
 
     return "\n".join(lines)
 
@@ -298,7 +376,7 @@ async def _handle_find_string_refs(input: dict, context: ToolContext) -> str:
         start = raw_output.find(_STRING_REFS_START)
         end = raw_output.find(_STRING_REFS_END)
         if start == -1 or end == -1:
-            return "Ghidra FindStringRefs produced no parseable output."
+            return _extract_ghidra_error(raw_output, "FindStringRefs")
 
         json_str = raw_output[start + len(_STRING_REFS_START):end].strip()
         # Extract JSON array
@@ -453,6 +531,10 @@ async def _handle_check_all_binary_protections(
             except (OSError, PermissionError):
                 continue
 
+            # Skip kernel modules — not user-space binaries
+            if name.endswith(".ko") or ".ko." in name:
+                continue
+
             rel_path = "/" + os.path.relpath(abs_path, real_root)
 
             try:
@@ -584,7 +666,7 @@ async def _handle_trace_dataflow(input: dict, context: ToolContext) -> str:
         start = raw_output.find(_TAINT_START)
         end = raw_output.find(_TAINT_END)
         if start == -1 or end == -1:
-            return "Ghidra TaintAnalysis produced no parseable output."
+            return _extract_ghidra_error(raw_output, "TaintAnalysis")
 
         json_str = raw_output[start + len(_TAINT_START):end].strip()
         json_start = json_str.find("[")
@@ -651,6 +733,582 @@ async def _handle_trace_dataflow(input: dict, context: ToolContext) -> str:
     return "\n".join(lines)
 
 
+async def _handle_find_callers(input: dict, context: ToolContext) -> str:
+    """Find all functions that call the target function."""
+    path = validate_path(context.extracted_path, input["binary_path"])
+    target = input["function_name"]
+    include_aliases = input.get("include_aliases", True)
+
+    cache = get_analysis_cache()
+    binary_sha256 = await cache.ensure_analysis(path, context.firmware_id, context.db)
+
+    cached = await cache.get_cached(
+        context.firmware_id, binary_sha256, "xrefs", context.db,
+    )
+    if not cached:
+        return f"No xref data available for this binary. Run list_functions first."
+
+    xrefs = cached.get("xrefs", {})
+
+    # Build alias set for the target (e.g. doSystemCmd -> _doSystemCmd, PLT thunks)
+    targets = {target}
+    if include_aliases:
+        targets.add(f"_{target}")
+        targets.add(f"__{target}")
+        targets.add(f"{target}_plt")
+        # Also check if target starts with underscore — add base name
+        if target.startswith("_") and not target.startswith("__"):
+            targets.add(target[1:])
+
+    callers: list[dict] = []
+    seen: set[str] = set()
+
+    # Strategy 1: Check the target's own "to" (incoming) xrefs
+    for t in targets:
+        func_xrefs = xrefs.get(t, {})
+        for ref in func_xrefs.get("to", []):
+            from_func = ref.get("from_func", "")
+            key = f"{from_func}:{ref.get('from', '')}"
+            if key not in seen:
+                seen.add(key)
+                callers.append({
+                    "caller": from_func or "unknown",
+                    "address": ref.get("from", "unknown"),
+                    "type": ref.get("type", "CALL"),
+                })
+
+    # Strategy 2: Reverse scan all functions' outgoing "from" xrefs
+    for func_name, func_data in xrefs.items():
+        for ref in func_data.get("from", []):
+            to_func = ref.get("to_func", "")
+            if to_func in targets:
+                key = f"{func_name}:{ref.get('from', ref.get('address', ''))}"
+                if key not in seen:
+                    seen.add(key)
+                    callers.append({
+                        "caller": func_name,
+                        "address": ref.get("from", ref.get("address", "unknown")),
+                        "type": ref.get("type", "CALL"),
+                    })
+
+    if not callers:
+        return f"No callers found for '{target}' (also checked aliases: {targets})."
+
+    # Sort by caller name
+    callers.sort(key=lambda c: c["caller"])
+
+    lines = [
+        f"Found {len(callers)} call site(s) of '{target}':",
+        "",
+    ]
+    for c in callers:
+        lines.append(f"  {c['caller']}  @ {c['address']}  [{c['type']}]")
+
+    return "\n".join(lines)
+
+
+async def _handle_search_binary_content(input: dict, context: ToolContext) -> str:
+    """Search for byte patterns, strings, or disassembly patterns in a binary."""
+    path = validate_path(context.extracted_path, input["binary_path"])
+    mode = input.get("mode", "string")
+    pattern = input["pattern"]
+    max_results = min(input.get("max_results", 50), 100)
+
+    cache = get_analysis_cache()
+
+    if mode == "disasm":
+        # Search cached disassembly text with a regex
+        binary_sha256 = await cache.ensure_analysis(
+            path, context.firmware_id, context.db,
+        )
+        functions = await cache.get_functions(path, context.firmware_id, context.db)
+        if not functions:
+            return "No functions found (binary not analyzed)."
+
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            return f"Invalid regex pattern: {exc}"
+
+        matches: list[dict] = []
+        for fn in functions:
+            fn_name = fn.get("name", "unknown")
+            disasm_cached = await cache.get_cached(
+                context.firmware_id, binary_sha256,
+                f"disasm:{fn_name}", context.db,
+            )
+            if not disasm_cached:
+                continue
+            disasm_text = disasm_cached.get("disassembly", "")
+            for line in disasm_text.splitlines():
+                if regex.search(line):
+                    matches.append({"function": fn_name, "line": line.strip()})
+                    if len(matches) >= max_results:
+                        break
+            if len(matches) >= max_results:
+                break
+
+        if not matches:
+            return f"No disassembly lines matching '{pattern}' found."
+
+        lines = [f"Found {len(matches)} disassembly match(es) for '{pattern}':", ""]
+        for m in matches:
+            lines.append(f"  [{m['function']}] {m['line']}")
+        return "\n".join(lines)
+
+    # Hex or string mode — scan the binary file directly
+    if mode == "hex":
+        # Parse hex pattern: "48 8b 45 f8" or "488b45f8"
+        hex_clean = pattern.replace(" ", "").replace("\\x", "")
+        try:
+            search_bytes = bytes.fromhex(hex_clean)
+        except ValueError:
+            return f"Invalid hex pattern: '{pattern}'. Use format like '48 8b 45 f8'."
+    else:
+        # String mode
+        search_bytes = pattern.encode("utf-8", errors="replace")
+
+    if not search_bytes:
+        return "Empty search pattern."
+
+    file_size = os.path.getsize(path)
+    chunk_size = 65536
+    overlap = len(search_bytes) - 1
+    matches: list[dict] = []
+
+    # Get function address ranges for mapping offsets to functions
+    func_ranges: list[tuple[int, int, str]] = []
+    try:
+        functions = await cache.get_functions(path, context.firmware_id, context.db)
+        for fn in functions:
+            addr_str = fn.get("address", "0")
+            size = fn.get("size", 0)
+            try:
+                addr = int(addr_str, 16) if addr_str.startswith("0x") else int(addr_str)
+                func_ranges.append((addr, addr + size, fn.get("name", "unknown")))
+            except (ValueError, TypeError):
+                pass
+        func_ranges.sort(key=lambda r: r[0])
+    except Exception:
+        pass
+
+    def _find_function(offset: int) -> str:
+        """Binary search for containing function."""
+        lo, hi = 0, len(func_ranges) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            start, end, name = func_ranges[mid]
+            if offset < start:
+                hi = mid - 1
+            elif offset >= end:
+                lo = mid + 1
+            else:
+                return name
+        return ""
+
+    with open(path, "rb") as f:
+        pos = 0
+        prev_tail = b""
+        while pos < file_size and len(matches) < max_results:
+            f.seek(pos)
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            # Prepend overlap from previous chunk to catch cross-boundary matches
+            search_buf = prev_tail + chunk
+            offset_base = pos - len(prev_tail)
+
+            idx = 0
+            while idx < len(search_buf) and len(matches) < max_results:
+                found = search_buf.find(search_bytes, idx)
+                if found == -1:
+                    break
+                abs_offset = offset_base + found
+                # Get context bytes (16 bytes before and after)
+                ctx_start = max(0, found - 16)
+                ctx_end = min(len(search_buf), found + len(search_bytes) + 16)
+                ctx_hex = search_buf[ctx_start:ctx_end].hex()
+                func_name = _find_function(abs_offset)
+                matches.append({
+                    "offset": abs_offset,
+                    "context": ctx_hex,
+                    "function": func_name,
+                })
+                idx = found + 1
+
+            prev_tail = chunk[-overlap:] if overlap > 0 else b""
+            pos += len(chunk)
+
+    if not matches:
+        mode_desc = "hex bytes" if mode == "hex" else "string"
+        return f"No matches for {mode_desc} '{pattern}' in binary."
+
+    lines = [f"Found {len(matches)} match(es):", ""]
+    for m in matches:
+        func_info = f"  in {m['function']}" if m["function"] else ""
+        lines.append(f"  offset 0x{m['offset']:08x}{func_info}")
+        lines.append(f"    hex: {m['context']}")
+    if len(matches) >= max_results:
+        lines.append(f"\n  (limited to {max_results} results)")
+
+    return "\n".join(lines)
+
+
+async def _handle_get_stack_layout(input: dict, context: ToolContext) -> str:
+    """Get annotated stack frame layout for a function."""
+    path = validate_path(context.extracted_path, input["binary_path"])
+    function_name = input["function_name"]
+
+    cache = get_analysis_cache()
+    binary_sha256 = await cache.get_binary_sha256(path)
+    cache_key = f"stack_layout:{function_name}"
+
+    # Check cache
+    cached = await cache.get_cached(
+        context.firmware_id, binary_sha256, cache_key, context.db,
+    )
+    if cached:
+        result = cached
+    else:
+        # Run Ghidra StackLayout script
+        try:
+            raw_output = await run_ghidra_subprocess(
+                path, "StackLayout.java", script_args=[function_name],
+            )
+        except (RuntimeError, TimeoutError) as exc:
+            return f"Error: {exc}"
+
+        start = raw_output.find(_STACK_LAYOUT_START)
+        end = raw_output.find(_STACK_LAYOUT_END)
+        if start == -1 or end == -1:
+            return _extract_ghidra_error(raw_output, "StackLayout")
+
+        json_str = raw_output[start + len(_STACK_LAYOUT_START):end].strip()
+        json_start = json_str.find("{")
+        json_end = json_str.rfind("}")
+        if json_start == -1 or json_end == -1:
+            return "No stack layout data found."
+
+        try:
+            result = json.loads(json_str[json_start:json_end + 1])
+        except json.JSONDecodeError as exc:
+            logger.error("Failed to parse StackLayout JSON: %s", exc)
+            return "Error parsing Ghidra output."
+
+        # Cache
+        await cache.store_cached(
+            context.firmware_id, path, binary_sha256, cache_key,
+            result, context.db,
+        )
+
+    # Format output
+    func_name = result.get("function", function_name)
+    frame_size = result.get("frame_size", 0)
+    variables = result.get("variables", [])
+    saved_regs = result.get("saved_registers", [])
+    overflows = result.get("overflow_distances", [])
+
+    lines = [
+        f"Stack Layout for {func_name} (frame size: {frame_size} bytes):",
+        "",
+        f"  {'Offset':<10} {'Size':<8} {'Type':<20} {'Name'}",
+        f"  {'─' * 10} {'─' * 8} {'─' * 20} {'─' * 20}",
+    ]
+    for v in variables:
+        offset = v.get("offset", 0)
+        size = v.get("size", 0)
+        vtype = v.get("type", "unknown")[:20]
+        name = v.get("name", "?")
+        marker = " <-- return addr" if v.get("is_return_addr") else ""
+        lines.append(f"  {offset:<10} {size:<8} {vtype:<20} {name}{marker}")
+
+    if saved_regs:
+        lines.append("")
+        lines.append("Saved Registers:")
+        for sr in saved_regs:
+            reg = sr.get("register", "?")
+            offset = sr.get("offset", 0)
+            lines.append(f"  offset {offset}: {reg}")
+
+    if overflows:
+        lines.append("")
+        lines.append("Buffer Overflow Distances:")
+        for od in overflows:
+            buf = od.get("buffer", "?")
+            dist = od.get("distance", 0)
+            lines.append(
+                f"  {buf} (offset {od.get('buffer_offset', '?')}) → "
+                f"return addr (offset {od.get('return_addr_offset', '?')}): "
+                f"{dist} bytes"
+            )
+
+    return "\n".join(lines)
+
+
+async def _handle_get_global_layout(input: dict, context: ToolContext) -> str:
+    """Get global variable layout around a target symbol."""
+    path = validate_path(context.extracted_path, input["binary_path"])
+    symbol_name = input["symbol_name"]
+
+    cache = get_analysis_cache()
+    binary_sha256 = await cache.get_binary_sha256(path)
+    cache_key = f"global_layout:{symbol_name}"
+
+    # Check cache
+    cached = await cache.get_cached(
+        context.firmware_id, binary_sha256, cache_key, context.db,
+    )
+    if cached:
+        result = cached
+    else:
+        # Run Ghidra GlobalLayout script
+        try:
+            raw_output = await run_ghidra_subprocess(
+                path, "GlobalLayout.java", script_args=[symbol_name],
+            )
+        except (RuntimeError, TimeoutError) as exc:
+            return f"Error: {exc}"
+
+        start = raw_output.find(_GLOBAL_LAYOUT_START)
+        end = raw_output.find(_GLOBAL_LAYOUT_END)
+        if start == -1 or end == -1:
+            return _extract_ghidra_error(raw_output, "GlobalLayout")
+
+        json_str = raw_output[start + len(_GLOBAL_LAYOUT_START):end].strip()
+        json_start = json_str.find("{")
+        json_end = json_str.rfind("}")
+        if json_start == -1 or json_end == -1:
+            return "No global layout data found."
+
+        try:
+            result = json.loads(json_str[json_start:json_end + 1])
+        except json.JSONDecodeError as exc:
+            logger.error("Failed to parse GlobalLayout JSON: %s", exc)
+            return "Error parsing Ghidra output."
+
+        # Cache
+        await cache.store_cached(
+            context.firmware_id, path, binary_sha256, cache_key,
+            result, context.db,
+        )
+
+    # Format output
+    target_sym = result.get("target_symbol", symbol_name)
+    target_addr = result.get("target_address", "?")
+    section = result.get("section", "?")
+    section_range = result.get("section_range", [])
+    neighbors = result.get("neighbors", [])
+
+    lines = [
+        f"Global Layout around '{target_sym}' @ {target_addr}",
+        f"Section: {section}",
+    ]
+    if section_range:
+        lines.append(f"Section range: {section_range[0]} - {section_range[1]}")
+    lines.append("")
+    lines.append(f"  {'Address':<14} {'Size':<8} {'Type':<24} {'Name'}")
+    lines.append(f"  {'─' * 14} {'─' * 8} {'─' * 24} {'─' * 20}")
+
+    for n in neighbors:
+        addr = n.get("address", "?")
+        size = n.get("size", 0)
+        ntype = n.get("type", "unknown")[:24]
+        name = n.get("name", "?")
+        marker = "  <-- TARGET" if n.get("is_target") else ""
+        lines.append(f"  {addr:<14} {size:<8} {ntype:<24} {name}{marker}")
+
+    return "\n".join(lines)
+
+
+async def _handle_cross_binary_dataflow(input: dict, context: ToolContext) -> str:
+    """Trace data flows across binaries via IPC mechanisms (nvram, config, files)."""
+    search_path = validate_path(context.extracted_path, input.get("path", "/"))
+    real_root = os.path.realpath(context.extracted_path)
+    mechanisms = input.get("mechanisms")  # Optional filter
+
+    ELF_MAGIC = b"\x7fELF"
+    cache = get_analysis_cache()
+
+    # Step 1: Find all analyzed ELF binaries
+    analyzed_binaries: list[tuple[str, str]] = []  # (abs_path, rel_path)
+    for dirpath, _dirs, files in safe_walk(search_path):
+        for name in files:
+            abs_path = os.path.join(dirpath, name)
+            if os.path.islink(abs_path):
+                continue
+            try:
+                with open(abs_path, "rb") as f:
+                    if f.read(4) != ELF_MAGIC:
+                        continue
+            except (OSError, PermissionError):
+                continue
+
+            # Skip kernel modules — not user-space binaries
+            if name.endswith(".ko") or ".ko." in name:
+                continue
+
+            rel_path = "/" + os.path.relpath(abs_path, real_root)
+
+            # Check if this binary has been Ghidra-analyzed
+            try:
+                sha = await cache.get_binary_sha256(abs_path)
+                is_analyzed = await cache.get_cached(
+                    context.firmware_id, sha, "ghidra_full_analysis", context.db,
+                )
+                if is_analyzed:
+                    analyzed_binaries.append((abs_path, rel_path))
+            except Exception:
+                continue
+
+    if not analyzed_binaries:
+        return (
+            "No Ghidra-analyzed binaries found. Run list_functions on key "
+            "binaries first to trigger analysis, then re-run this tool."
+        )
+
+    # Step 2: For each analyzed binary, get imports and check for IPC functions
+    # Map: {mechanism: {key_or_func: [{binary, function, role, call_site}]}}
+    ipc_map: dict[str, dict[str, list[dict]]] = {}
+
+    pairs_to_check = _IPC_PAIRS
+    if mechanisms:
+        pairs_to_check = {
+            k: v for k, v in _IPC_PAIRS.items()
+            if k in mechanisms
+        }
+
+    for abs_path, rel_path in analyzed_binaries:
+        sha = await cache.get_binary_sha256(abs_path)
+
+        # Get imports
+        imports_cached = await cache.get_cached(
+            context.firmware_id, sha, "imports", context.db,
+        )
+        if not imports_cached:
+            continue
+        import_names = {
+            imp.get("name", "") for imp in imports_cached.get("imports", [])
+        }
+
+        # Get xrefs
+        xrefs_cached = await cache.get_cached(
+            context.firmware_id, sha, "xrefs", context.db,
+        )
+        xrefs_data = xrefs_cached.get("xrefs", {}) if xrefs_cached else {}
+
+        for mechanism, pair in pairs_to_check.items():
+            all_funcs = pair["writers"] + pair["readers"]
+            relevant_imports = import_names & set(all_funcs)
+            if not relevant_imports:
+                continue
+
+            for ipc_func in relevant_imports:
+                role = "writer" if ipc_func in pair["writers"] else "reader"
+
+                # Find callers of this IPC function via xrefs
+                callers: list[dict] = []
+                for func_name, func_data in xrefs_data.items():
+                    for ref in func_data.get("from", []):
+                        if ref.get("to_func") == ipc_func:
+                            callers.append({
+                                "binary": rel_path,
+                                "function": func_name,
+                                "role": role,
+                                "ipc_func": ipc_func,
+                                "call_site": ref.get("from", ref.get("address", "?")),
+                            })
+
+                if callers:
+                    ipc_map.setdefault(mechanism, {}).setdefault(ipc_func, []).extend(callers)
+
+    if not ipc_map:
+        return (
+            f"No IPC dataflow found across {len(analyzed_binaries)} analyzed binaries.\n"
+            "This may mean the binaries don't use standard IPC functions, or "
+            "the relevant binaries haven't been analyzed yet."
+        )
+
+    # Step 3: Correlate cross-binary flows
+    cross_flows: list[dict] = []
+
+    for mechanism, func_map in ipc_map.items():
+        pair = pairs_to_check[mechanism]
+        writers: list[dict] = []
+        readers: list[dict] = []
+
+        for ipc_func, entries in func_map.items():
+            for entry in entries:
+                if entry["role"] == "writer":
+                    writers.append(entry)
+                else:
+                    readers.append(entry)
+
+        # Find cross-binary pairs (writer in binary A, reader in binary B)
+        for w in writers:
+            for r in readers:
+                if w["binary"] != r["binary"]:
+                    cross_flows.append({
+                        "mechanism": mechanism,
+                        "writer_binary": w["binary"],
+                        "writer_function": w["function"],
+                        "writer_ipc": w["ipc_func"],
+                        "reader_binary": r["binary"],
+                        "reader_function": r["function"],
+                        "reader_ipc": r["ipc_func"],
+                    })
+
+    # Format output
+    lines = [
+        f"Cross-Binary Dataflow Analysis",
+        f"Analyzed binaries: {len(analyzed_binaries)}",
+        "",
+    ]
+
+    # Show per-mechanism summary
+    for mechanism, func_map in ipc_map.items():
+        all_entries = [e for entries in func_map.values() for e in entries]
+        writers = [e for e in all_entries if e["role"] == "writer"]
+        readers = [e for e in all_entries if e["role"] == "reader"]
+        unique_binaries = {e["binary"] for e in all_entries}
+
+        lines.append(f"## {mechanism.upper()} IPC")
+        lines.append(f"  {len(writers)} writer(s), {len(readers)} reader(s) "
+                      f"across {len(unique_binaries)} binary(ies)")
+
+        for ipc_func, entries in func_map.items():
+            lines.append(f"  {ipc_func}():")
+            for e in entries[:10]:
+                lines.append(
+                    f"    [{e['role']}] {e['binary']}:{e['function']} "
+                    f"@ {e['call_site']}"
+                )
+            if len(entries) > 10:
+                lines.append(f"    ... and {len(entries) - 10} more")
+        lines.append("")
+
+    if cross_flows:
+        lines.append(f"## Cross-Binary Flows ({len(cross_flows)})")
+        lines.append("")
+        shown = cross_flows[:30]
+        for cf in shown:
+            lines.append(
+                f"  [{cf['mechanism']}] "
+                f"{cf['writer_binary']}:{cf['writer_function']}() "
+                f"--{cf['writer_ipc']}()--> "
+                f"{cf['reader_binary']}:{cf['reader_function']}() "
+                f"via {cf['reader_ipc']}()"
+            )
+        if len(cross_flows) > 30:
+            lines.append(f"  ... and {len(cross_flows) - 30} more")
+    else:
+        lines.append(
+            "No cross-binary flows detected (all IPC calls are within "
+            "the same binary). Try analyzing more binaries with list_functions."
+        )
+
+    return "\n".join(lines)
+
+
 def register_binary_tools(registry: ToolRegistry) -> None:
     """Register all binary analysis tools with the given registry."""
 
@@ -669,6 +1327,14 @@ def register_binary_tools(registry: ToolRegistry) -> None:
                 "binary_path": {
                     "type": "string",
                     "description": "Path to the ELF binary in the firmware filesystem",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum number of functions to return (default: 100, max: 500). "
+                        "Functions are sorted by size descending, so the top 100 captures "
+                        "the most interesting ones."
+                    ),
                 },
             },
             "required": ["binary_path"],
@@ -985,4 +1651,179 @@ def register_binary_tools(registry: ToolRegistry) -> None:
             "required": ["binary_path"],
         },
         handler=_handle_trace_dataflow,
+    )
+
+    # --- Wishlist tools ---
+
+    registry.register(
+        name="find_callers",
+        description=(
+            "Find all call sites of a function across the binary. Scans cached "
+            "cross-reference data to find every function that calls the target. "
+            "Automatically checks common aliases (e.g., _doSystemCmd, __system, "
+            "PLT thunks). Requires the binary to have been analyzed first "
+            "(run list_functions if needed)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the ELF binary in the firmware filesystem",
+                },
+                "function_name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the target function to find callers for "
+                        "(e.g. 'doSystemCmd', 'system', 'strcpy')"
+                    ),
+                },
+                "include_aliases": {
+                    "type": "boolean",
+                    "description": (
+                        "Also search for common aliases like _func, __func, "
+                        "func_plt (default: true)"
+                    ),
+                },
+            },
+            "required": ["binary_path", "function_name"],
+        },
+        handler=_handle_find_callers,
+    )
+
+    registry.register(
+        name="search_binary_content",
+        description=(
+            "Search for byte patterns, strings, or disassembly patterns in a "
+            "binary. Three search modes:\n"
+            "- 'hex': Search for hex byte patterns (e.g., '48 8b 45 f8')\n"
+            "- 'string': Search for string patterns (e.g., '%s%s%s', 'password')\n"
+            "- 'disasm': Search cached disassembly with regex (e.g., 'sprintf.*%s')\n\n"
+            "For hex/string modes, returns file offsets and hex context. "
+            "For disasm mode, returns matching instruction lines with function names."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the ELF binary in the firmware filesystem",
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": (
+                        "Pattern to search for. Hex mode: '48 8b 45 f8' or '488b45f8'. "
+                        "String mode: any text like '%s%s%s'. "
+                        "Disasm mode: regex like 'sprintf.*%s'."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["hex", "string", "disasm"],
+                    "description": "Search mode (default: 'string')",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default: 50, max: 100)",
+                },
+            },
+            "required": ["binary_path", "pattern"],
+        },
+        handler=_handle_search_binary_content,
+    )
+
+    registry.register(
+        name="get_stack_layout",
+        description=(
+            "Get the annotated stack frame layout for a function. Shows local "
+            "variables, their offsets, sizes, and types. Identifies saved "
+            "registers (including the return address) and calculates buffer-to-"
+            "return-address overflow distances — critical for assessing buffer "
+            "overflow exploitability. Uses Ghidra analysis — first call for a "
+            "binary may take 1-3 minutes. Results are cached."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the ELF binary in the firmware filesystem",
+                },
+                "function_name": {
+                    "type": "string",
+                    "description": (
+                        "Function name to analyze stack layout for "
+                        "(e.g. 'formSetSysToolChangePwd')"
+                    ),
+                },
+            },
+            "required": ["binary_path", "function_name"],
+        },
+        handler=_handle_get_stack_layout,
+    )
+
+    registry.register(
+        name="get_global_layout",
+        description=(
+            "Map global variables in BSS/data sections around a target symbol. "
+            "Shows neighboring global variables with their addresses, sizes, and "
+            "types. Useful for understanding global buffer overflow impact — what "
+            "data gets corrupted when a global buffer overflows. Uses Ghidra "
+            "analysis — first call for a binary may take 1-3 minutes. Results "
+            "are cached."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "binary_path": {
+                    "type": "string",
+                    "description": "Path to the ELF binary in the firmware filesystem",
+                },
+                "symbol_name": {
+                    "type": "string",
+                    "description": (
+                        "Name of the target global variable/symbol "
+                        "(e.g. 'g_Pass', 'config_buf')"
+                    ),
+                },
+            },
+            "required": ["binary_path", "symbol_name"],
+        },
+        handler=_handle_get_global_layout,
+    )
+
+    registry.register(
+        name="cross_binary_dataflow",
+        description=(
+            "Trace data flows across multiple firmware binaries via IPC "
+            "mechanisms (nvram_get/set, config get/set, file I/O). Identifies "
+            "where data written by one binary (e.g., httpd setting an nvram "
+            "value) is read by another binary (e.g., cfmd reading it). "
+            "Only works on binaries that have been previously analyzed with "
+            "Ghidra (run list_functions on key binaries first). Scans all "
+            "analyzed binaries for IPC function imports and correlates "
+            "cross-binary data flows."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Directory to scan for analyzed binaries "
+                        "(default: entire firmware filesystem)"
+                    ),
+                },
+                "mechanisms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional filter: only check specific IPC mechanisms. "
+                        "Available: 'nvram', 'config', 'file'. "
+                        "Default: check all."
+                    ),
+                },
+            },
+        },
+        handler=_handle_cross_binary_dataflow,
     )
