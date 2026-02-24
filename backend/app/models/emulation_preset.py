@@ -31,6 +31,7 @@ class EmulationPreset(Base):
     kernel_name: Mapped[str | None] = mapped_column(String(255))
     init_path: Mapped[str | None] = mapped_column(String(512))
     pre_init_script: Mapped[str | None] = mapped_column(Text)
+    stub_profile: Mapped[str] = mapped_column(String(50), nullable=False, server_default="none")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

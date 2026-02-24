@@ -18,6 +18,7 @@ class EmulationStartRequest(BaseModel):
     kernel_name: str | None = None
     init_path: str | None = None  # Override /sbin/init (e.g., "/bin/sh" or "/bin/busybox")
     pre_init_script: str | None = None  # Shell script to run before firmware init (e.g., start cfmd, set up LD_PRELOAD)
+    stub_profile: Literal["none", "generic", "tenda"] | None = None  # Stub library profile for system-mode emulation
 
 
 class EmulationSessionResponse(BaseModel):
@@ -70,6 +71,7 @@ class EmulationPresetCreate(BaseModel):
     kernel_name: str | None = None
     init_path: str | None = None
     pre_init_script: str | None = None
+    stub_profile: Literal["none", "generic", "tenda"] = "none"
 
 
 class EmulationPresetUpdate(BaseModel):
@@ -83,6 +85,7 @@ class EmulationPresetUpdate(BaseModel):
     kernel_name: str | None = None
     init_path: str | None = None
     pre_init_script: str | None = None
+    stub_profile: Literal["none", "generic", "tenda"] | None = None
 
 
 class EmulationPresetResponse(BaseModel):
@@ -100,5 +103,6 @@ class EmulationPresetResponse(BaseModel):
     kernel_name: str | None
     init_path: str | None
     pre_init_script: str | None
+    stub_profile: str
     created_at: datetime
     updated_at: datetime

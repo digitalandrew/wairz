@@ -307,6 +307,7 @@ class EmulationService:
         kernel_name: str | None = None,
         init_path: str | None = None,
         pre_init_script: str | None = None,
+        stub_profile: str = "none",
     ) -> EmulationSession:
         """Start a new emulation session.
 
@@ -319,6 +320,7 @@ class EmulationService:
             kernel_name: Specific kernel to use for system mode.
             init_path: Override init binary for system mode (e.g., "/bin/sh").
             pre_init_script: Shell script to run before firmware init (system mode).
+            stub_profile: Stub library profile ("none", "generic", "tenda").
         """
         if mode not in ("user", "system"):
             raise ValueError("mode must be 'user' or 'system'")
@@ -371,6 +373,7 @@ class EmulationService:
                 firmware_kernel_path=firmware.kernel_path,
                 init_path=init_path,
                 pre_init_script=pre_init_script,
+                stub_profile=stub_profile,
             )
             session.container_id = container_id
             session.status = "running"
@@ -635,49 +638,70 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
         if output:
             logger.info("Firmware symlink repair: %s", output)
 
-    # Map canonical architecture → stub library filename
-    STUB_MAP: dict[str, str] = {
-        "mipsel": "fake_mtd_mipsel.so",
-        "mips": "fake_mtd_mips.so",
-        "arm": "fake_mtd_arm.so",
-        "aarch64": "fake_mtd_aarch64.so",
+    # Map stub profile + architecture → list of .so filenames to inject
+    STUB_PROFILE_MAP: dict[str, dict[str, list[str]]] = {
+        "none": {},
+        "generic": {
+            "mipsel": ["stubs_generic_mipsel.so"],
+            "mips": ["stubs_generic_mips.so"],
+            "arm": ["stubs_generic_arm.so"],
+            "aarch64": ["stubs_generic_aarch64.so"],
+        },
+        "tenda": {
+            "mipsel": ["stubs_generic_mipsel.so", "stubs_tenda_mipsel.so"],
+            "mips": ["stubs_generic_mips.so", "stubs_tenda_mips.so"],
+            "arm": ["stubs_generic_arm.so", "stubs_tenda_arm.so"],
+            "aarch64": ["stubs_generic_aarch64.so", "stubs_tenda_aarch64.so"],
+        },
     }
 
     @staticmethod
     def _inject_stub_libraries(
         container: "docker.models.containers.Container",
         architecture: str | None,
+        stub_profile: str = "none",
     ) -> None:
         """Copy arch-matched LD_PRELOAD stub libraries into the firmware rootfs.
 
         Pre-compiled stubs live in /opt/stubs/ inside the emulation container.
-        This copies the appropriate one into /firmware/opt/stubs/fake_mtd.so
-        so it's available inside the emulated firmware via:
-            export LD_PRELOAD=/opt/stubs/fake_mtd.so
+        Based on the stub_profile, copies the appropriate .so files into
+        /firmware/opt/stubs/ so they're available inside the emulated firmware.
+
+        Profiles:
+          - "none": no stubs injected
+          - "generic": MTD flash + wireless ioctl stubs
+          - "tenda": generic + Tenda-specific function stubs
         """
-        if not architecture:
+        if stub_profile == "none" or not architecture:
+            if stub_profile != "none":
+                logger.debug("No architecture for stub injection, skipping")
             return
 
-        stub_file = EmulationService.STUB_MAP.get(architecture)
-        if not stub_file:
-            logger.debug("No stub library available for architecture: %s", architecture)
+        arch_map = EmulationService.STUB_PROFILE_MAP.get(stub_profile, {})
+        stub_files = arch_map.get(architecture, [])
+        if not stub_files:
+            logger.debug(
+                "No stub libraries for profile=%s arch=%s", stub_profile, architecture
+            )
             return
 
-        result = container.exec_run([
-            "sh", "-c",
-            f"if [ -f /opt/stubs/{stub_file} ]; then "
-            f"mkdir -p /firmware/opt/stubs && "
-            f"cp /opt/stubs/{stub_file} /firmware/opt/stubs/fake_mtd.so && "
-            f"chmod 755 /firmware/opt/stubs/fake_mtd.so && "
-            f"echo OK; else echo MISSING; fi"
-        ])
+        # Build shell command to copy all stubs
+        copy_cmds = ["mkdir -p /firmware/opt/stubs"]
+        for stub_file in stub_files:
+            copy_cmds.append(
+                f"if [ -f /opt/stubs/{stub_file} ]; then "
+                f"cp /opt/stubs/{stub_file} /firmware/opt/stubs/{stub_file} && "
+                f"chmod 755 /firmware/opt/stubs/{stub_file} && "
+                f"echo 'OK: {stub_file}'; else echo 'MISSING: {stub_file}'; fi"
+            )
+
+        result = container.exec_run(["sh", "-c", " && ".join(copy_cmds)])
         output = result.output.decode("utf-8", errors="replace").strip()
-        if "OK" in output:
-            logger.info("Injected stub library: /opt/stubs/%s -> /firmware/opt/stubs/fake_mtd.so", stub_file)
-        elif "MISSING" in output:
-            logger.debug("Stub library not found in container: /opt/stubs/%s", stub_file)
-        else:
-            logger.warning("Stub library injection returned unexpected output: %s", output)
+        for line in output.splitlines():
+            if line.startswith("OK:"):
+                logger.info("Injected stub: %s", line[4:].strip())
+            elif line.startswith("MISSING:"):
+                logger.warning("Stub not found in container: %s", line[9:].strip())
 
     def _find_initrd(
         self,
@@ -714,14 +738,15 @@ echo "Symlink repair: pass1=$PASS1 pass2=$PASS2 pass3=$PASS3"
     def _generate_init_wrapper(
         original_init: str | None = None,
         pre_init_script: str | None = None,
+        stub_profile: str = "none",
     ) -> str:
         """Generate a wairz init wrapper script for system-mode emulation.
 
         The wrapper runs before the firmware's own init and handles:
         - Mounting proc, sysfs, devtmpfs, tmpfs
         - Configuring networking (QEMU user-mode always uses 10.0.2.0/24)
+        - Setting LD_PRELOAD for stub libraries (based on stub_profile)
         - Sourcing an optional pre-init script for firmware-specific setup
-          (e.g., LD_PRELOAD, fake MTD, starting cfmd)
         - Executing the firmware's original init or an interactive shell
         """
         # Determine what to exec after setup
@@ -819,16 +844,28 @@ if command -v ifconfig >/dev/null 2>&1; then
 fi
 {pre_init_block}
 
-# Export LD_PRELOAD for stub libraries if present.
+# Enable core dumps for crash analysis
+ulimit -c unlimited 2>/dev/null || true
+mkdir -p /tmp/cores 2>/dev/null
+if [ -d /proc/sys/kernel ]; then
+    echo "/tmp/cores/core.%e.%p" > /proc/sys/kernel/core_pattern 2>/dev/null || true
+fi
+echo "[wairz] Core dumps enabled: /tmp/cores/core.<binary>.<pid>"
+
+# Export LD_PRELOAD for stub libraries based on stub_profile setting.
 # This ensures ALL processes started by the firmware's init inherit the stubs.
 # /etc/ld.so.preload is NOT supported by musl libc — only the env var works.
-if [ -f /opt/stubs/fake_mtd.so ]; then
-    export LD_PRELOAD=/opt/stubs/fake_mtd.so
+{"" if stub_profile == "none" else '''STUBS=""
+for f in /opt/stubs/stubs_*.so; do
+    [ -f "$f" ] && STUBS="$STUBS $f"
+done
+STUBS=$(echo "$STUBS" | sed 's/^ //')
+if [ -n "$STUBS" ]; then
+    export LD_PRELOAD="$STUBS"
     echo "[wairz] LD_PRELOAD set: $LD_PRELOAD"
-elif [ -f /lib/fake_mtd.so ]; then
-    export LD_PRELOAD=/lib/fake_mtd.so
-    echo "[wairz] LD_PRELOAD set: $LD_PRELOAD"
-fi
+else
+    echo "[wairz] No stub libraries found in /opt/stubs/"
+fi'''}
 
 echo "[wairz] Starting firmware init..."
 {exec_line}
@@ -839,6 +876,7 @@ echo "[wairz] Starting firmware init..."
         container: "docker.models.containers.Container",
         init_path: str | None = None,
         pre_init_script: str | None = None,
+        stub_profile: str = "none",
     ) -> str:
         """Inject the wairz init wrapper into the firmware rootfs.
 
@@ -848,7 +886,9 @@ echo "[wairz] Starting firmware init..."
 
         Returns the init_path to pass to start-system-mode.sh ("/wairz_init.sh").
         """
-        wrapper = EmulationService._generate_init_wrapper(init_path, pre_init_script)
+        wrapper = EmulationService._generate_init_wrapper(
+            init_path, pre_init_script, stub_profile=stub_profile
+        )
 
         # Write the wrapper script
         container.exec_run([
@@ -881,6 +921,7 @@ echo "[wairz] Starting firmware init..."
         firmware_kernel_path: str | None = None,
         init_path: str | None = None,
         pre_init_script: str | None = None,
+        stub_profile: str = "none",
     ) -> str:
         """Spawn a Docker container for this emulation session."""
         client = self._get_docker_client()
@@ -982,12 +1023,10 @@ echo "[wairz] Starting firmware init..."
             self._fix_firmware_permissions(container)
 
         # Inject LD_PRELOAD stub libraries into the firmware rootfs.
-        # These are pre-compiled .so files in /opt/stubs/ inside the emulation
-        # container, matched to the firmware's architecture. They're copied into
+        # Based on stub_profile, copies the appropriate .so files into
         # /firmware/opt/stubs/ so they end up in the ext4 rootfs for system mode
-        # and in the chroot for user mode. Usage is via pre_init_script:
-        #   export LD_PRELOAD=/opt/stubs/fake_mtd.so
-        self._inject_stub_libraries(container, session.architecture)
+        # and in the chroot for user mode. The init wrapper handles LD_PRELOAD.
+        self._inject_stub_libraries(container, session.architecture, stub_profile)
 
         # For user mode, ensure binfmt_misc is registered for the target
         # architecture so child processes (spawned by the QEMU-emulated shell)
@@ -1041,13 +1080,15 @@ echo "[wairz] Starting firmware init..."
                 logger.info("Copied initrd to container: %s", initrd_backend_path)
 
             # Inject init wrapper into the firmware rootfs. The wrapper
-            # auto-mounts proc/sysfs, configures networking, sources the
-            # optional pre-init script, then execs the original init.
+            # auto-mounts proc/sysfs, configures networking, sets LD_PRELOAD
+            # based on stub_profile, sources the optional pre-init script,
+            # then execs the original init.
             # This must happen before ext4 image creation in start-system-mode.sh.
             wrapper_init = self._inject_init_wrapper(
                 container,
                 init_path=init_path,
                 pre_init_script=pre_init_script,
+                stub_profile=stub_profile,
             )
 
             pf_str = ""
@@ -1562,6 +1603,7 @@ echo "[wairz] Starting firmware init..."
         kernel_name: str | None = None,
         init_path: str | None = None,
         pre_init_script: str | None = None,
+        stub_profile: str = "none",
     ) -> EmulationPreset:
         """Create a new emulation preset for a project."""
         preset = EmulationPreset(
@@ -1576,6 +1618,7 @@ echo "[wairz] Starting firmware init..."
             kernel_name=kernel_name,
             init_path=init_path,
             pre_init_script=pre_init_script,
+            stub_profile=stub_profile,
         )
         self.db.add(preset)
         await self.db.flush()

@@ -41,6 +41,7 @@ import type {
   EmulationStatus,
   PortForward,
   EmulationPreset,
+  StubProfile,
 } from '@/types'
 import '@xterm/xterm/css/xterm.css'
 
@@ -73,6 +74,7 @@ export default function EmulationPage() {
   const [firmwareKernelPath, setFirmwareKernelPath] = useState<string | null>(null)
   const [initPath, setInitPath] = useState('')
   const [preInitScript, setPreInitScript] = useState('')
+  const [stubProfile, setStubProfile] = useState<StubProfile>('none')
 
   // Presets
   const [presets, setPresets] = useState<EmulationPreset[]>([])
@@ -172,6 +174,7 @@ export default function EmulationPage() {
         kernel_name: mode === 'system' && kernelName ? kernelName : undefined,
         init_path: mode === 'system' && initPath.trim() ? initPath.trim() : undefined,
         pre_init_script: mode === 'system' && preInitScript.trim() ? preInitScript.trim() : undefined,
+        stub_profile: mode === 'system' && stubProfile !== 'none' ? stubProfile : undefined,
       })
       setActiveSession(session)
       if (session.status === 'running' || session.status === 'error') {
@@ -249,6 +252,7 @@ export default function EmulationPage() {
     setKernelName(preset.kernel_name || null)
     setInitPath(preset.init_path || '')
     setPreInitScript(preset.pre_init_script || '')
+    setStubProfile(preset.stub_profile || 'none')
   }
 
   const handleSavePreset = async () => {
@@ -266,6 +270,7 @@ export default function EmulationPage() {
         kernel_name: mode === 'system' && kernelName ? kernelName : undefined,
         init_path: mode === 'system' && initPath.trim() ? initPath.trim() : undefined,
         pre_init_script: mode === 'system' && preInitScript.trim() ? preInitScript.trim() : undefined,
+        stub_profile: mode === 'system' && stubProfile !== 'none' ? stubProfile : undefined,
       })
       setShowSavePreset(false)
       setPresetName('')
@@ -331,13 +336,18 @@ export default function EmulationPage() {
                 >
                   <button
                     onClick={() => loadPresetIntoForm(preset)}
-                    className="flex-1 text-left"
+                    className="flex-1 text-left min-w-0"
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">{preset.name}</span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-medium truncate">{preset.name}</span>
                       <Badge variant="outline" className="text-[10px]">
                         {preset.mode}
                       </Badge>
+                      {preset.stub_profile && preset.stub_profile !== 'none' && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          stubs: {preset.stub_profile}
+                        </Badge>
+                      )}
                     </div>
                     {preset.description && (
                       <p className="mt-0.5 text-xs text-muted-foreground truncate">
@@ -490,17 +500,34 @@ export default function EmulationPage() {
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Stub Libraries
+                </label>
+                <select
+                  value={stubProfile}
+                  onChange={(e) => setStubProfile(e.target.value as StubProfile)}
+                  className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                >
+                  <option value="none">None — no stubs injected</option>
+                  <option value="generic">Generic — MTD flash + wireless ioctl stubs</option>
+                  <option value="tenda">Tenda — generic + Tenda-specific stubs</option>
+                </select>
+                <p className="mt-0.5 text-xs text-muted-foreground/60">
+                  LD_PRELOAD stub libraries for hardware emulation. Use &quot;generic&quot; for most firmware, &quot;tenda&quot; for Tenda devices.
+                </p>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
                   Pre-Init Script
                 </label>
                 <textarea
                   value={preInitScript}
                   onChange={(e) => setPreInitScript(e.target.value)}
-                  placeholder={"# Runs before firmware init\nexport LD_PRELOAD=/opt/stubs/fake_mtd.so\n/bin/cfmd &\nsleep 1\n/bin/httpd &"}
+                  placeholder={"# Runs before firmware init\n/bin/cfmd &\nsleep 1\n/bin/httpd &"}
                   rows={5}
                   className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm font-mono focus:border-primary focus:outline-none resize-y"
                 />
                 <p className="mt-0.5 text-xs text-muted-foreground/60">
-                  Shell script sourced before firmware init (LD_PRELOAD, service startup, etc.)
+                  Shell script sourced before firmware init (service startup, config setup, etc.)
                 </p>
               </div>
               </>

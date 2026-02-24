@@ -278,6 +278,8 @@ export interface EmulationSession {
   created_at: string
 }
 
+export type StubProfile = 'none' | 'generic' | 'tenda'
+
 export interface EmulationStartRequest {
   mode: EmulationMode
   binary_path?: string
@@ -286,6 +288,7 @@ export interface EmulationStartRequest {
   kernel_name?: string
   init_path?: string
   pre_init_script?: string
+  stub_profile?: StubProfile
 }
 
 export interface EmulationPreset {
@@ -301,6 +304,7 @@ export interface EmulationPreset {
   kernel_name: string | null
   init_path: string | null
   pre_init_script: string | null
+  stub_profile: StubProfile
   created_at: string
   updated_at: string
 }
@@ -316,6 +320,7 @@ export interface EmulationPresetCreate {
   kernel_name?: string
   init_path?: string
   pre_init_script?: string
+  stub_profile?: StubProfile
 }
 
 export interface EmulationPresetUpdate {
@@ -329,6 +334,7 @@ export interface EmulationPresetUpdate {
   kernel_name?: string
   init_path?: string
   pre_init_script?: string
+  stub_profile?: StubProfile
 }
 
 // ── Kernel types ──

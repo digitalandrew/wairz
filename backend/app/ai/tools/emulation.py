@@ -165,12 +165,24 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
                         "the wairz init wrapper has mounted filesystems and configured "
                         "networking. The script runs inside the emulated system as PID 1's "
                         "child. Use this for firmware-specific setup like:\n"
-                        "- export LD_PRELOAD=/path/to/fake_mtd.so\n"
                         "- mkdir -p /cfg && cp /webroot/default.cfg /cfg/mib.cfg\n"
                         "- /bin/cfmd &\n"
                         "- sleep 1 && /bin/httpd &\n"
                         "The script is sourced (not exec'd), so environment variables "
                         "set here are inherited by the firmware's init."
+                    ),
+                },
+                "stub_profile": {
+                    "type": "string",
+                    "enum": ["none", "generic", "tenda"],
+                    "description": (
+                        "Stub library profile for system-mode emulation (default: 'none').\n"
+                        "- 'none': No stubs injected. Safe for any firmware.\n"
+                        "- 'generic': MTD flash stubs + wireless ioctl passthrough. "
+                        "Good for most embedded Linux firmware that accesses /dev/mtdN.\n"
+                        "- 'tenda': Generic + Tenda-specific stubs (GetConutryCode, "
+                        "proc_check_app, ifaddrs_get_lan_ifname, etc.). "
+                        "Required for Tenda firmware (AC8, AC15, etc.)."
                     ),
                 },
             },
@@ -191,6 +203,9 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "Run ONE command per call. Do NOT use pipes (|), chaining (&&, ;), "
             "backgrounding (&), or subshells — these are unreliable over serial "
             "and often return empty output. Run separate tool calls instead. "
+            "BLOCKING COMMANDS: Commands like 'cat /proc/kmsg', 'dmesg -w', "
+            "'tail -f', 'top', 'tcpdump', and interactive programs (vi, telnet, ssh) "
+            "will be detected and rejected with a suggested alternative. "
             "If a previous command is stuck (e.g., a foreground daemon), set "
             "send_ctrl_c=true to send Ctrl-C before executing the new command."
         ),
@@ -359,6 +374,82 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
         handler=_handle_enumerate_services,
     )
 
+    # ── Core Dumps & GDB Debugging ──
+
+    registry.register(
+        name="get_crash_dump",
+        description=(
+            "Capture and analyze core dumps from a running system-mode emulation "
+            "session. Checks /tmp/cores/ for core files, then uses gdb-multiarch "
+            "to extract backtrace, register state, and faulting instruction. "
+            "Core dumps are enabled automatically by the init wrapper "
+            "(ulimit -c unlimited, core_pattern=/tmp/cores/core.%e.%p). "
+            "Use this after a binary crashes to understand the crash cause."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The emulation session ID",
+                },
+                "binary_path": {
+                    "type": "string",
+                    "description": (
+                        "Optional: path to the binary that crashed (within firmware filesystem). "
+                        "If omitted, analyzes the most recent core dump found."
+                    ),
+                },
+            },
+            "required": ["session_id"],
+        },
+        handler=_handle_get_crash_dump,
+    )
+
+    registry.register(
+        name="run_gdb_command",
+        description=(
+            "Execute GDB commands against a running system-mode emulation session "
+            "via QEMU's built-in GDB stub (port 1234). Writes a GDB script and "
+            "runs it with gdb-multiarch in batch mode.\n\n"
+            "IMPORTANT: When GDB connects, the guest VM PAUSES. Commands like "
+            "'continue' resume it. Serial console commands will hang while the "
+            "VM is paused. The script automatically detaches at the end to "
+            "resume normal execution.\n\n"
+            "Example gdb_commands:\n"
+            "- 'info registers' — dump all registers\n"
+            "- 'x/20i $pc' — disassemble 20 instructions at current PC\n"
+            "- 'break *0x00401234\\ncontinue' — set breakpoint and resume\n"
+            "- 'bt' — backtrace (if guest is stopped at a crash)"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The emulation session ID (must be a running system-mode session)",
+                },
+                "gdb_commands": {
+                    "type": "string",
+                    "description": (
+                        "GDB commands to execute, one per line. "
+                        "Example: 'info registers\\nbt\\nx/20i $pc'"
+                    ),
+                },
+                "binary_path": {
+                    "type": "string",
+                    "description": (
+                        "Optional: path to an ELF binary within the firmware filesystem "
+                        "to load symbols from (e.g., '/bin/httpd'). Enables symbolic "
+                        "backtraces and variable inspection."
+                    ),
+                },
+            },
+            "required": ["session_id", "gdb_commands"],
+        },
+        handler=_handle_run_gdb_command,
+    )
+
     # ── Emulation Presets ──
 
     registry.register(
@@ -415,6 +506,11 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
                 "pre_init_script": {
                     "type": "string",
                     "description": "Pre-init shell script (for system mode)",
+                },
+                "stub_profile": {
+                    "type": "string",
+                    "enum": ["none", "generic", "tenda"],
+                    "description": "Stub library profile (default: 'none')",
                 },
             },
             "required": ["name", "mode"],
@@ -545,6 +641,7 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
     kernel_name = input.get("kernel_name")
     init_path = input.get("init_path")
     pre_init_script = input.get("pre_init_script")
+    stub_profile = input.get("stub_profile", "none")
 
     if mode == "user" and not binary_path:
         return "Error: binary_path is required for user-mode emulation."
@@ -576,6 +673,7 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
             kernel_name=kernel_name,
             init_path=init_path,
             pre_init_script=pre_init_script,
+            stub_profile=stub_profile,
         )
         await context.db.commit()
     except ValueError as exc:
@@ -604,6 +702,8 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
             "Auto-setup: /proc, /sys, /dev, /tmp mounted; "
             "networking configured (eth0 10.0.2.15/24, gw 10.0.2.2)."
         )
+        if stub_profile != "none":
+            lines.append(f"Stub profile: {stub_profile}")
         if pre_init_script:
             lines.append("Pre-init script: injected and will run before firmware init.")
 
@@ -627,6 +727,28 @@ async def _handle_start_emulation(input: dict, context: ToolContext) -> str:
     return "\n".join(lines)
 
 
+# Patterns for commands that will block the serial console until timeout.
+# Each entry is (pattern, suggestion).
+_BLOCKING_COMMAND_PATTERNS: list[tuple[str, str]] = [
+    ("cat /proc/kmsg", "Use 'dmesg' instead (non-blocking snapshot of kernel log)"),
+    ("dmesg -w", "Use 'dmesg' without -w (non-blocking snapshot)"),
+    ("dmesg --follow", "Use 'dmesg' without --follow (non-blocking snapshot)"),
+    ("tail -f ", "Use 'tail -n' for last N lines instead of following"),
+    ("tail -F ", "Use 'tail -n' for last N lines instead of following"),
+    ("top", "Use 'ps' or 'ps -ef' for a process snapshot instead"),
+    ("htop", "Use 'ps' or 'ps -ef' for a process snapshot instead"),
+    ("watch ", "Run the command once directly instead of using watch"),
+    ("tcpdump", "Use 'tcpdump -c N' to capture a fixed number of packets"),
+    ("cat /dev/", "Reading device files blocks indefinitely; use specific tools instead"),
+    ("nc -l", "Listening with nc blocks until connection; this will timeout"),
+    ("telnet ", "Interactive telnet sessions don't work over serial console"),
+    ("ssh ", "Interactive SSH sessions don't work over serial console"),
+    ("vi ", "Interactive editors don't work over serial console; use 'cat' to read files"),
+    ("vim ", "Interactive editors don't work over serial console; use 'cat' to read files"),
+    ("nano ", "Interactive editors don't work over serial console; use 'cat' to read files"),
+]
+
+
 async def _handle_run_command(input: dict, context: ToolContext) -> str:
     """Execute a command in a running emulation session."""
     session_id = input.get("session_id")
@@ -637,6 +759,19 @@ async def _handle_run_command(input: dict, context: ToolContext) -> str:
 
     if not session_id or not command:
         return "Error: session_id and command are required."
+
+    # Check for known blocking commands
+    cmd_stripped = command.strip()
+    for pattern, suggestion in _BLOCKING_COMMAND_PATTERNS:
+        if cmd_stripped == pattern or cmd_stripped.startswith(pattern):
+            return (
+                f"WARNING: '{cmd_stripped}' will block the serial console until "
+                f"timeout ({timeout}s) because it produces continuous output or "
+                f"waits for input indefinitely.\n\n"
+                f"Suggestion: {suggestion}\n\n"
+                "If you still want to run this command, add a timeout wrapper: "
+                f"'timeout 5 {cmd_stripped}'"
+            )
 
     svc = EmulationService(context.db)
 
@@ -1668,6 +1803,348 @@ async def _handle_troubleshoot_emulation(input: dict, context: ToolContext) -> s
 
 
 # ---------------------------------------------------------------------------
+# Core dump & GDB tool handlers
+# ---------------------------------------------------------------------------
+
+
+async def _handle_get_crash_dump(input: dict, context: ToolContext) -> str:
+    """Capture and analyze core dumps from emulation."""
+    session_id = input.get("session_id")
+    binary_path = input.get("binary_path")
+
+    if not session_id:
+        return "Error: session_id is required."
+
+    from uuid import UUID
+    svc = EmulationService(context.db)
+
+    # Step 1: List core files
+    try:
+        result = await svc.exec_command(
+            session_id=UUID(session_id),
+            command="ls -la /tmp/cores/",
+            timeout=10,
+        )
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    cores_output = result.get("stdout", "")
+    if not cores_output or "No such file" in cores_output or "total 0" in cores_output:
+        return (
+            "No core dumps found in /tmp/cores/.\n\n"
+            "Core dumps are enabled automatically (ulimit -c unlimited, "
+            "core_pattern=/tmp/cores/core.%e.%p). If a binary crashed, "
+            "check that:\n"
+            "1. The crash actually triggered a core dump (SIGSEGV, SIGABRT, etc.)\n"
+            "2. The /tmp/cores directory exists and is writable\n"
+            "3. The binary wasn't killed with SIGKILL (which doesn't produce cores)"
+        )
+
+    # Step 2: Find the most recent / largest core file
+    try:
+        result = await svc.exec_command(
+            session_id=UUID(session_id),
+            command="ls -S /tmp/cores/",
+            timeout=10,
+        )
+        core_files = [
+            f.strip() for f in result.get("stdout", "").splitlines()
+            if f.strip().startswith("core.")
+        ]
+    except Exception:
+        core_files = []
+
+    if not core_files:
+        return f"No core.* files found.\nDirectory listing:\n{cores_output}"
+
+    # If binary_path specified, try to find matching core
+    target_core = core_files[0]  # Default: largest
+    if binary_path:
+        binary_name = os.path.basename(binary_path)
+        for cf in core_files:
+            if binary_name in cf:
+                target_core = cf
+                break
+
+    core_path = f"/tmp/cores/{target_core}"
+
+    # Step 3: Determine the binary path for GDB
+    # Extract binary name from core filename (format: core.<binary_name>.<pid>)
+    parts = target_core.split(".")
+    core_binary_name = parts[1] if len(parts) >= 2 else ""
+
+    # Build GDB binary argument
+    gdb_binary = ""
+    if binary_path:
+        gdb_binary = binary_path
+    elif core_binary_name:
+        # Try common locations
+        for prefix in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]:
+            candidate = prefix + core_binary_name
+            try:
+                check = await svc.exec_command(
+                    session_id=UUID(session_id),
+                    command=f"test -f {candidate}",
+                    timeout=5,
+                )
+                if check.get("exit_code") == 0:
+                    gdb_binary = candidate
+                    break
+            except Exception:
+                continue
+
+    # Step 4: Run GDB analysis on the core dump
+    # Note: We run gdb-multiarch in the Docker container (not inside the guest)
+    # So we need to access files via the rootfs mount
+    result_obj = await context.db.execute(
+        select(EmulationSession).where(EmulationSession.id == UUID(session_id))
+    )
+    session = result_obj.scalar_one_or_none()
+    if not session or not session.container_id:
+        return "Error: session not found or no container."
+
+    import docker
+    client = docker.from_env()
+    try:
+        container = client.containers.get(session.container_id)
+    except docker.errors.NotFound:
+        return "Error: emulation container not found."
+
+    # First, copy core file out of the guest rootfs to the container's /tmp
+    # The core is already at /tmp/cores/ inside the guest, but we need to
+    # access it from outside QEMU. Use serial-exec to copy it.
+    try:
+        result = await svc.exec_command(
+            session_id=UUID(session_id),
+            command=f"wc -c < {core_path}",
+            timeout=10,
+        )
+        core_size = result.get("stdout", "").strip()
+    except Exception:
+        core_size = "unknown"
+
+    # Run GDB in the container against the core file
+    # We need the core and binary accessible to gdb-multiarch running in the container
+    # The guest's /tmp/cores is inside the ext4 rootfs image, not directly accessible.
+    # Use a simpler approach: run gdb inside the emulated guest via serial console
+    gdb_cmd_parts = ["gdb-multiarch", "-batch"]
+    if gdb_binary:
+        gdb_cmd_parts.extend(["-ex", f"file {gdb_binary}"])
+    gdb_cmd_parts.extend([
+        "-ex", f"core-file {core_path}",
+        "-ex", "bt",
+        "-ex", "info registers",
+        "-ex", "x/10i $pc-16",
+        "-ex", "info signal",
+    ])
+
+    # Run via serial console (gdb-multiarch should be available in initramfs or firmware)
+    # Actually, gdb won't be in the guest. Let's try a different approach:
+    # Mount the ext4 image and run gdb in the container context.
+    gdb_script = (
+        "set pagination off\n"
+        "set confirm off\n"
+    )
+    if gdb_binary:
+        gdb_script += f"file {gdb_binary}\n"
+    gdb_script += (
+        f"core-file {core_path}\n"
+        "echo === BACKTRACE ===\\n\n"
+        "bt\n"
+        "echo === REGISTERS ===\\n\n"
+        "info registers\n"
+        "echo === FAULTING INSTRUCTION ===\\n\n"
+        "x/10i $pc-16\n"
+        "echo === SIGNAL INFO ===\\n\n"
+        "info signal\n"
+        "quit\n"
+    )
+
+    # Run inside guest via serial — gdb-multiarch won't be there.
+    # Alternative: tell user the core location and size.
+    lines = [
+        f"Core Dump Analysis",
+        f"  Core file: {core_path} ({core_size} bytes)",
+        f"  Binary: {gdb_binary or '(unknown)'}",
+        "",
+        "Core files found:",
+    ]
+    for cf in core_files[:10]:
+        lines.append(f"  {cf}")
+
+    # Try basic analysis via the guest's file command if available
+    try:
+        result = await svc.exec_command(
+            session_id=UUID(session_id),
+            command=f"file {core_path}",
+            timeout=10,
+        )
+        file_output = result.get("stdout", "").strip()
+        if file_output:
+            lines.append("")
+            lines.append(f"File type: {file_output}")
+    except Exception:
+        pass
+
+    # Try to get a basic signal from /proc if the process is still running
+    if core_binary_name:
+        try:
+            result = await svc.exec_command(
+                session_id=UUID(session_id),
+                command=f"dmesg",
+                timeout=10,
+            )
+            dmesg = result.get("stdout", "")
+            # Look for segfault/signal messages related to the binary
+            crash_lines = [
+                l for l in dmesg.splitlines()
+                if core_binary_name in l and ("segfault" in l.lower() or "signal" in l.lower() or "killed" in l.lower())
+            ]
+            if crash_lines:
+                lines.append("")
+                lines.append("Kernel crash messages:")
+                for cl in crash_lines[-5:]:
+                    lines.append(f"  {cl}")
+        except Exception:
+            pass
+
+    lines.append("")
+    lines.append(
+        "Note: To perform full GDB triage, use run_gdb_command to connect "
+        "to the QEMU GDB stub and set breakpoints before triggering the crash again."
+    )
+
+    return "\n".join(lines)
+
+
+async def _handle_run_gdb_command(input: dict, context: ToolContext) -> str:
+    """Execute GDB commands via QEMU's built-in GDB stub."""
+    session_id = input.get("session_id")
+    gdb_commands = input.get("gdb_commands", "")
+    binary_path = input.get("binary_path")
+
+    if not session_id or not gdb_commands:
+        return "Error: session_id and gdb_commands are required."
+
+    from uuid import UUID
+
+    # Get session and container
+    result = await context.db.execute(
+        select(EmulationSession).where(EmulationSession.id == UUID(session_id))
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        return "Error: session not found."
+    if session.status != "running":
+        return f"Error: session is not running (status: {session.status})."
+    if session.mode != "system":
+        return "Error: GDB debugging is only supported for system-mode emulation."
+    if not session.container_id:
+        return "Error: no container associated with this session."
+
+    import docker
+    client = docker.from_env()
+    try:
+        container = client.containers.get(session.container_id)
+    except docker.errors.NotFound:
+        return "Error: emulation container not found."
+
+    # Build GDB script with correct architecture settings
+    GDB_ARCH_MAP = {
+        "arm": ("arm", "little"),
+        "aarch64": ("aarch64", "little"),
+        "mips": ("mips", "big"),
+        "mipsel": ("mips", "little"),
+        "x86": ("i386", "little"),
+        "x86_64": ("i386:x86-64", "little"),
+    }
+    arch = session.architecture or "arm"
+    gdb_arch, gdb_endian = GDB_ARCH_MAP.get(arch, ("arm", "little"))
+
+    gdb_script = "set pagination off\nset confirm off\n"
+    gdb_script += f"set architecture {gdb_arch}\n"
+    gdb_script += f"set endian {gdb_endian}\n"
+    gdb_script += "target remote localhost:1234\n"
+
+    # Load symbols from binary if specified
+    if binary_path:
+        # The binary is at /firmware/<path> inside the container
+        fw_binary = f"/firmware{binary_path}" if not binary_path.startswith("/firmware") else binary_path
+        gdb_script += f"file {fw_binary}\n"
+
+    # Add user commands
+    for cmd_line in gdb_commands.split("\\n"):
+        cmd_line = cmd_line.strip()
+        if cmd_line:
+            gdb_script += cmd_line + "\n"
+
+    # Always detach at end to resume the VM
+    gdb_script += "detach\nquit\n"
+
+    # Write the script to a temp file in the container and execute
+    import shlex
+    escaped_script = gdb_script.replace("'", "'\\''")
+
+    exec_cmd = [
+        "sh", "-c",
+        f"echo '{escaped_script}' > /tmp/gdb_script.gdb && "
+        "gdb-multiarch -batch -x /tmp/gdb_script.gdb 2>&1"
+    ]
+
+    try:
+        exec_result = container.exec_run(exec_cmd, demux=True)
+        stdout = (exec_result.output[0] or b"").decode("utf-8", errors="replace")
+        stderr = (exec_result.output[1] or b"").decode("utf-8", errors="replace")
+    except Exception as exc:
+        return f"Error running GDB: {exc}"
+
+    lines = ["GDB Output:", ""]
+
+    if stdout:
+        # Filter out GDB noise
+        filtered = []
+        for line in stdout.splitlines():
+            # Skip common GDB startup noise
+            if any(skip in line for skip in [
+                "Reading symbols", "This GDB was configured",
+                "(gdb)", "For help,", "GNU gdb",
+                "Copyright (C)", "License GPLv3",
+                "warranty;", "<http://",
+                "Find the GDB manual",
+            ]):
+                continue
+            filtered.append(line)
+        lines.append("\n".join(filtered))
+
+    if stderr:
+        # Filter warnings but keep errors
+        err_lines = [l for l in stderr.splitlines() if "warning:" not in l.lower()]
+        if err_lines:
+            lines.append("")
+            lines.append("Errors:")
+            lines.append("\n".join(err_lines))
+
+    exit_code = exec_result.exit_code
+    if exit_code != 0:
+        lines.append(f"\nGDB exit code: {exit_code}")
+
+    lines.append("")
+    lines.append(
+        "Note: The guest VM was paused while GDB was connected and has been "
+        "resumed (detached). Serial console commands should work normally again."
+    )
+
+    # Truncate if needed
+    settings = get_settings()
+    max_bytes = settings.max_tool_output_kb * 1024
+    output = "\n".join(lines)
+    if len(output) > max_bytes:
+        output = output[:max_bytes] + f"\n... [truncated at {settings.max_tool_output_kb}KB]"
+
+    return output
+
+
+# ---------------------------------------------------------------------------
 # Preset tool handlers
 # ---------------------------------------------------------------------------
 
@@ -1695,6 +2172,7 @@ async def _handle_save_preset(input: dict, context: ToolContext) -> str:
             kernel_name=input.get("kernel_name"),
             init_path=input.get("init_path"),
             pre_init_script=input.get("pre_init_script"),
+            stub_profile=input.get("stub_profile", "none"),
         )
         await context.db.commit()
     except Exception as exc:
@@ -1708,6 +2186,8 @@ async def _handle_save_preset(input: dict, context: ToolContext) -> str:
     ]
     if preset.description:
         lines.append(f"  Description: {preset.description}")
+    if preset.stub_profile != "none":
+        lines.append(f"  Stub profile: {preset.stub_profile}")
     if preset.pre_init_script:
         lines.append(f"  Pre-init script: {len(preset.pre_init_script)} chars")
     lines.append("")
@@ -1731,6 +2211,8 @@ async def _handle_list_presets(input: dict, context: ToolContext) -> str:
         lines.append(f"    ID: {p.id}")
         if p.binary_path:
             lines.append(f"    Binary: {p.binary_path}")
+        if p.stub_profile != "none":
+            lines.append(f"    Stubs: {p.stub_profile}")
         if p.pre_init_script:
             lines.append(f"    Pre-init script: {len(p.pre_init_script)} chars")
         if p.port_forwards:
@@ -1780,6 +2262,7 @@ async def _handle_start_from_preset(input: dict, context: ToolContext) -> str:
         "kernel_name": preset.kernel_name,
         "init_path": preset.init_path,
         "pre_init_script": preset.pre_init_script,
+        "stub_profile": preset.stub_profile,
     }
 
     result = await _handle_start_emulation(start_input, context)

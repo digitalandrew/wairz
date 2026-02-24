@@ -71,6 +71,7 @@ async def start_emulation(
             kernel_name=request.kernel_name,
             init_path=request.init_path,
             pre_init_script=request.pre_init_script,
+            stub_profile=request.stub_profile or "none",
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -196,6 +197,7 @@ async def create_preset(
             kernel_name=request.kernel_name,
             init_path=request.init_path,
             pre_init_script=request.pre_init_script,
+            stub_profile=request.stub_profile,
         )
         await db.commit()
     except ValueError as exc:
