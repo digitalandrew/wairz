@@ -4,6 +4,7 @@ import type {
   ImportsResponse,
   DisassemblyResponse,
   DecompilationResponse,
+  CleanedCodeResponse,
   BinaryInfoResponse,
 } from '@/types'
 
@@ -49,6 +50,18 @@ export async function decompileFunction(
 ): Promise<DecompilationResponse> {
   const { data } = await apiClient.get<DecompilationResponse>(
     `/projects/${projectId}/analysis/decompile`,
+    { params: { path: binaryPath, function: functionName } },
+  )
+  return data
+}
+
+export async function fetchCleanedCode(
+  projectId: string,
+  binaryPath: string,
+  functionName: string,
+): Promise<CleanedCodeResponse> {
+  const { data } = await apiClient.get<CleanedCodeResponse>(
+    `/projects/${projectId}/analysis/cleaned-code`,
     { params: { path: binaryPath, function: functionName } },
   )
   return data

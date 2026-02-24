@@ -105,6 +105,11 @@ export interface DecompilationResponse {
   decompiled_code: string
 }
 
+export interface CleanedCodeResponse {
+  available: boolean
+  cleaned_code: string | null
+}
+
 export interface BinaryProtections {
   nx: boolean
   relro: string

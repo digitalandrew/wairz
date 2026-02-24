@@ -267,6 +267,29 @@ async def get_binary_info(
     }
 
 
+@router.get("/cleaned-code")
+async def get_cleaned_code(
+    path: str = Query(..., description="Path to ELF binary"),
+    function: str = Query(..., description="Function name"),
+    firmware=Depends(_resolve_firmware),
+    db: AsyncSession = Depends(get_db),
+):
+    """Check if AI-cleaned decompiled code exists for a function."""
+    try:
+        full_path = validate_path(firmware.extracted_path, path)
+    except Exception:
+        raise HTTPException(403, "Invalid path")
+
+    cache = get_analysis_cache()
+    binary_sha256 = await cache.get_binary_sha256(full_path)
+    operation = f"code_cleanup:{function}"
+    cached = await cache.get_cached(firmware.id, binary_sha256, operation, db)
+
+    if cached and cached.get("cleaned_code"):
+        return {"available": True, "cleaned_code": cached["cleaned_code"]}
+    return {"available": False, "cleaned_code": None}
+
+
 @router.get("/decompile")
 async def decompile_function(
     path: str = Query(..., description="Path to ELF binary"),
