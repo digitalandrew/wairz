@@ -238,6 +238,7 @@ uv run wairz-mcp --project-id <PROJECT_ID>
 - Emulation: `start_emulation`, `run_command_in_emulation`, `stop_emulation`, `check_emulation_status`
 - Reporting: `add_finding`, `list_findings`, `update_finding`
 - Code: `cleanup_decompiled_code`, `save_code_cleanup`
+- UART: `uart_connect`, `uart_send_command`, `uart_read`, `uart_send_break`, `uart_send_raw`, `uart_disconnect`, `uart_status`, `uart_get_transcript`
 
 ---
 
@@ -701,6 +702,124 @@ Removed built-in AI orchestrator (Anthropic API client, WebSocket chat endpoint,
 
 ---
 
+### Phase 15: Live Device UART Console (Sessions 51–53)
+
+**Goal:** Enable Claude (via MCP) to interact with a live device's UART serial console for dynamic analysis, boot log capture, U-Boot interaction, and correlation with static firmware analysis — without requiring USB passthrough into Docker.
+
+**Architecture:** A standalone host-side bridge (`wairz-uart-bridge`) wraps pyserial in a TCP JSON protocol. MCP tools inside Docker connect to the bridge via `host.docker.internal`. Single device at a time. No frontend terminal in v1 (MCP-only).
+
+```
+Host Machine                         Docker (backend container)
+┌──────────────────────────┐         ┌───────────────────────────┐
+│  /dev/ttyUSB0            │         │  wairz-mcp                │
+│       │                  │         │       │                    │
+│  wairz-uart-bridge       │◄──TCP──▶│  uart MCP tools            │
+│  (pyserial + asyncio)    │  :9999  │  (JSON-over-TCP client)    │
+│  - transcript logging    │         │                            │
+│  - read ring buffer      │         │  uart_service.py           │
+│  - prompt detection      │         │  (bridge client + DB)      │
+│  - U-Boot break support  │         │                            │
+└──────────────────────────┘         └───────────────────────────┘
+```
+
+**Usage:**
+```bash
+# 1. Start the bridge on the host (where the USB-UART adapter is plugged in)
+python scripts/wairz-uart-bridge.py --port 9999 --transcript-dir ~/.wairz/uart-transcripts/
+
+# 2. Claude connects via MCP tools (bridge host/port configured in .env)
+```
+
+#### Session 15.1: Host-Side UART Bridge
+
+**Do:**
+- Create `scripts/wairz-uart-bridge.py` — standalone asyncio TCP server (~300-400 lines), no dependency on wairz backend:
+  - Dependencies: `pyserial`, `pyserial-asyncio` (or sync pyserial in thread executor)
+  - CLI: `--port` (TCP listen port, default 9999), `--bind` (default 127.0.0.1), `--transcript-dir` (default `~/.wairz/uart-transcripts/`)
+  - Manages **one serial connection at a time** — multiple TCP clients share the same serial session
+  - Serializes access to serial port so concurrent tool calls don't interleave
+- JSON-over-TCP protocol (newline-delimited JSON, request/response matched by `id` field):
+  - `connect` — open serial device with baud rate, data bits, parity, stop bits config
+  - `send_command` — send command string, wait for prompt (string or regex) or timeout, return captured output
+  - `read` — drain and return whatever is in the receive ring buffer (for boot logs, async output)
+  - `send_break` — send serial BREAK signal (pyserial `send_break()`) for U-Boot autoboot interrupt
+  - `send_raw` — send arbitrary bytes (hex-encoded) for non-shell interaction, boot interrupt sequences
+  - `get_transcript` — return last N lines of the transcript JSONL
+  - `status` — return connection state, device path, baud rate, bytes buffered, transcript file path
+  - `disconnect` — close serial connection, finalize transcript
+- **Read ring buffer**: background task continuously reads from serial port, appends to bounded buffer (~1MB). `read` drains the buffer. `send_command` drains first, sends, then reads until prompt/timeout
+- **Prompt detection**: `send_command` waits until output matches prompt string (e.g., `# `, `$ `, `=> ` for U-Boot) or regex, or timeout expires
+- **U-Boot support**: `send_break` for BREAK signal; `send_raw` with timing for space/ESC key during boot window; prompt detection works with U-Boot prompt (`=> `)
+- **Transcript logging**: every byte sent/received logged to JSONL file with timestamps:
+  ```jsonl
+  {"ts": "2026-02-24T14:30:22.123Z", "dir": "rx", "data": "U-Boot 2019.07\r\n"}
+  {"ts": "2026-02-24T14:30:22.456Z", "dir": "tx", "data": "\x03"}
+  {"ts": "2026-02-24T14:30:23.001Z", "dir": "cmd", "command": "printenv", "prompt": "=> "}
+  ```
+  New file per `connect` session. Filename: `YYYY-MM-DD_HHMMSS_{device}.jsonl`
+- **Error protocol**: all responses include `"ok": true/false`, errors include `"error": "message"`
+- **Testing**: use virtual serial pair (`socat -d -d pty,raw,echo=0 pty,raw,echo=0`) — no hardware needed for development
+
+#### Session 15.2: Backend — Database, Service, Config
+
+**Do:**
+- Create Alembic migration for `uart_sessions` table:
+  ```sql
+  CREATE TABLE uart_sessions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+      firmware_id UUID REFERENCES firmware(id) ON DELETE CASCADE,
+      device_path VARCHAR(255) NOT NULL,     -- /dev/ttyUSB0
+      baudrate INTEGER NOT NULL DEFAULT 115200,
+      status VARCHAR(20) DEFAULT 'created',  -- created, connected, error, closed
+      error_message TEXT,
+      transcript_path VARCHAR(512),          -- bridge-side path to transcript JSONL
+      connected_at TIMESTAMPTZ,
+      closed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  ```
+- Create `app/models/uart_session.py` — SQLAlchemy ORM model following existing patterns (Mapped/mapped_column, dual UUID defaults, FK cascade)
+- Create `app/schemas/uart.py` — Pydantic schemas with `from_attributes=True`
+- Update `app/config.py` — add UART bridge settings:
+  - `uart_bridge_host: str = "host.docker.internal"`
+  - `uart_bridge_port: int = 9999`
+  - `uart_command_timeout: int = 30`
+- Create `app/services/uart_service.py` — `UARTService` class:
+  - `connect(project_id, firmware_id, device_path, baudrate, ...)` — create DB record, send `connect` to bridge, update status
+  - `send_command(session_id, command, timeout, prompt)` — validate session connected, send `send_command` to bridge, return output
+  - `read_buffer(session_id, timeout)` — send `read` to bridge, return buffered output
+  - `send_break(session_id)` — send `send_break` to bridge
+  - `send_raw(session_id, data_hex)` — send `send_raw` to bridge
+  - `get_status(session_id)` — send `status` to bridge, return info
+  - `disconnect(session_id)` — send `disconnect` to bridge, update DB
+  - `get_transcript(session_id, tail_lines)` — send `get_transcript` to bridge, return recent entries
+  - Internal helper: `_bridge_request(request_dict) -> dict` — open TCP connection, send JSON line, read JSON response line. Fresh TCP connection per call (simple, no pooling needed for v1)
+- Update `docker-compose.yml` — add `extra_hosts: ["host.docker.internal:host-gateway"]` and `UART_BRIDGE_HOST`/`UART_BRIDGE_PORT` environment variables to backend service
+
+#### Session 15.3: MCP Tools — UART Integration
+
+**Do:**
+- Create `app/ai/tools/uart.py` with `register_uart_tools(registry)`:
+  - `uart_connect` — connect to UART device via bridge. Inputs: `device_path`, `baudrate` (default 115200), `data_bits` (default 8), `parity` (default "N"), `stop_bits` (default 1). No explicit session_id needed (single device — service tracks active session per project)
+  - `uart_send_command` — send shell command, wait for prompt, return output. Inputs: `command`, `timeout` (default 30s), `prompt` (default "# ")
+  - `uart_read` — read current receive buffer contents. Inputs: `timeout` (default 2s). For boot logs, async output, checking what's on the console
+  - `uart_send_break` — send serial BREAK signal. No inputs. For U-Boot autoboot interrupt, debug console trigger
+  - `uart_send_raw` — send raw bytes without waiting for response. Inputs: `data` (string or hex), `hex` (bool, default false). For U-Boot commands, boot interrupt sequences, binary protocols
+  - `uart_disconnect` — close serial connection and session. No inputs
+  - `uart_status` — check connection status, device info, transcript location. No inputs
+  - `uart_get_transcript` — get recent UART transcript entries. Inputs: `tail_lines` (default 100)
+- Update `app/ai/__init__.py` — import and call `register_uart_tools(registry)`
+- Update `app/ai/tools/__init__.py` if needed for tool module discovery
+
+**Key use cases enabled:**
+- **Live device shell access** — Claude sends commands to a booted device, reads output, investigates running system
+- **Boot log capture** — connect before power-on, capture full boot sequence, analyze for debug info/keys/errors
+- **U-Boot interaction** — send break to interrupt boot, read/modify U-Boot env, dump flash partitions via `md`/`nand read`
+- **Static ↔ dynamic correlation** — cross-reference extracted firmware analysis (existing tools) with live device state (UART tools): verify running services, test for discovered vulnerabilities, validate findings
+
+---
+
 ## Important Implementation Notes
 
 ### Security (of the tool itself)
@@ -744,6 +863,9 @@ EMULATION_KERNEL_DIR=/opt/emulation/kernels
 EMULATION_MAX_SESSIONS=3
 EMULATION_MEMORY_LIMIT_MB=512
 EMULATION_CPU_LIMIT=1.0
+UART_BRIDGE_HOST=host.docker.internal   # Host where wairz-uart-bridge is running
+UART_BRIDGE_PORT=9999                   # TCP port for UART bridge JSON protocol
+UART_COMMAND_TIMEOUT=30                 # Default timeout (seconds) for uart_send_command
 LOG_LEVEL=INFO
 ```
 
