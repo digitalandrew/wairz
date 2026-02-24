@@ -29,9 +29,11 @@ interface ProjectCardProps {
 export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
   const navigate = useNavigate()
   const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
 
   const handleExport = async () => {
     setExporting(true)
+    setExportError(null)
     try {
       const blob = await exportProject(project.id)
       const safeName = project.name.replace(/\s+/g, '_').replace(/\//g, '_')
@@ -43,8 +45,11 @@ export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-    } catch {
-      // error logged by API interceptor
+    } catch (err) {
+      const msg = err instanceof Error
+        ? err.message
+        : 'Export failed'
+      setExportError(msg)
     } finally {
       setExporting(false)
     }
@@ -86,6 +91,11 @@ export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
         <CardDescription className="line-clamp-2">
           {project.description || 'No description'}
         </CardDescription>
+        {exportError && (
+          <div className="mt-2 rounded bg-destructive/10 border border-destructive/20 p-2 text-xs text-destructive">
+            Export failed: {exportError}
+          </div>
+        )}
       </CardHeader>
       <CardFooter className="flex items-center justify-between pt-0">
         <Badge

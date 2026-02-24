@@ -2,12 +2,31 @@ import apiClient from './client'
 import type { ProjectDetail } from '@/types'
 
 export async function exportProject(projectId: string): Promise<Blob> {
-  const { data } = await apiClient.post<Blob>(
-    `/projects/${projectId}/export`,
-    null,
-    { responseType: 'blob', timeout: 600000 },
-  )
-  return data
+  try {
+    const { data } = await apiClient.post<Blob>(
+      `/projects/${projectId}/export`,
+      null,
+      { responseType: 'blob', timeout: 600000 },
+    )
+    return data
+  } catch (err) {
+    // With responseType: 'blob', axios returns error bodies as Blob objects.
+    // Parse the blob to extract the JSON error detail.
+    let detail: string | undefined
+    if (err && typeof err === 'object' && 'response' in err) {
+      const resp = (err as { response?: { data?: Blob } }).response
+      if (resp?.data instanceof Blob) {
+        try {
+          const text = await resp.data.text()
+          const json = JSON.parse(text)
+          detail = json.detail
+        } catch {
+          // blob wasn't valid JSON
+        }
+      }
+    }
+    throw detail ? new Error(detail) : err
+  }
 }
 
 export async function importProject(

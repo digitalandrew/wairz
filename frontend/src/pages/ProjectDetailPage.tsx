@@ -52,6 +52,7 @@ export default function ProjectDetailPage() {
   const [firmwareList, setFirmwareList] = useState<FirmwareDetail[]>([])
   const [showUpload, setShowUpload] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
 
   useEffect(() => {
     if (projectId) fetchProject(projectId)
@@ -113,6 +114,7 @@ export default function ProjectDetailPage() {
   const handleExport = async () => {
     if (!projectId) return
     setExporting(true)
+    setExportError(null)
     try {
       const blob = await exportProject(projectId)
       const safeName = project.name.replace(/\s+/g, '_').replace(/\//g, '_')
@@ -124,8 +126,11 @@ export default function ProjectDetailPage() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-    } catch {
-      // error logged by API interceptor
+    } catch (err) {
+      const msg = err instanceof Error
+        ? err.message
+        : 'Export failed'
+      setExportError(msg)
     } finally {
       setExporting(false)
     }
@@ -179,6 +184,12 @@ export default function ProjectDetailPage() {
           </Button>
         </div>
       </div>
+
+      {exportError && (
+        <div className="rounded bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
+          Export failed: {exportError}
+        </div>
+      )}
 
       {/* Firmware cards */}
       {firmware.length > 0 && (
