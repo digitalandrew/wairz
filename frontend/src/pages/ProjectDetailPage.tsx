@@ -14,6 +14,7 @@ import {
   GitCompareArrows,
   Plus,
   Tag,
+  Download,
 } from 'lucide-react'
 import { useProjectStore } from '@/stores/projectStore'
 import { listFirmware, deleteFirmware } from '@/api/firmware'
@@ -26,6 +27,7 @@ import FirmwareUpload from '@/components/projects/FirmwareUpload'
 import FirmwareMetadataCard from '@/components/projects/FirmwareMetadataCard'
 import DocumentsCard from '@/components/projects/DocumentsCard'
 import McpConnectionCard from '@/components/projects/McpConnectionCard'
+import { exportProject } from '@/api/exportImport'
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   ready: 'default',
@@ -49,6 +51,7 @@ export default function ProjectDetailPage() {
 
   const [firmwareList, setFirmwareList] = useState<FirmwareDetail[]>([])
   const [showUpload, setShowUpload] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     if (projectId) fetchProject(projectId)
@@ -107,6 +110,27 @@ export default function ProjectDetailPage() {
     }
   }
 
+  const handleExport = async () => {
+    if (!projectId) return
+    setExporting(true)
+    try {
+      const blob = await exportProject(projectId)
+      const safeName = project.name.replace(/\s+/g, '_').replace(/\//g, '_')
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${safeName}.wairz`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      // error logged by API interceptor
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const handleUploadComplete = () => {
     setShowUpload(false)
     if (projectId) {
@@ -140,6 +164,14 @@ export default function ProjectDetailPage() {
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
             </Link>
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleExport} disabled={exporting}>
+            {exporting ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="mr-2 h-4 w-4" />
+            )}
+            Export
           </Button>
           <Button variant="destructive" size="sm" onClick={handleDelete}>
             <Trash2 className="mr-2 h-4 w-4" />

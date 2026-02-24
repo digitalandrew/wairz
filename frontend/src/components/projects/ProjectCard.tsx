@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { MoreHorizontal, FolderOpen, Trash2 } from 'lucide-react'
+import { MoreHorizontal, FolderOpen, Trash2, Download } from 'lucide-react'
 import type { Project } from '@/types'
+import { exportProject } from '@/api/exportImport'
 import { Card, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -26,6 +28,27 @@ interface ProjectCardProps {
 
 export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
   const navigate = useNavigate()
+  const [exporting, setExporting] = useState(false)
+
+  const handleExport = async () => {
+    setExporting(true)
+    try {
+      const blob = await exportProject(project.id)
+      const safeName = project.name.replace(/\s+/g, '_').replace(/\//g, '_')
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${safeName}.wairz`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      // error logged by API interceptor
+    } finally {
+      setExporting(false)
+    }
+  }
 
   return (
     <Card
@@ -45,6 +68,10 @@ export default function ProjectCard({ project, onDelete }: ProjectCardProps) {
               <DropdownMenuItem onClick={() => navigate(`/projects/${project.id}`)}>
                 <FolderOpen className="mr-2 h-4 w-4" />
                 Open
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleExport} disabled={exporting}>
+                <Download className="mr-2 h-4 w-4" />
+                {exporting ? 'Exporting...' : 'Export'}
               </DropdownMenuItem>
               <DropdownMenuItem
                 variant="destructive"
