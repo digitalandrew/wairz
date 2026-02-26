@@ -28,7 +28,7 @@ async def get_file_service(
             raise HTTPException(404, "No firmware uploaded for this project")
     if not firmware.extracted_path:
         raise HTTPException(400, "Firmware not yet unpacked")
-    return FileService(firmware.extracted_path)
+    return FileService(firmware.extracted_path, extraction_dir=firmware.extraction_dir)
 
 
 @router.get("")

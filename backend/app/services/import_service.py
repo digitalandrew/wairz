@@ -91,6 +91,7 @@ class ImportService:
             status=project_data.get("status", "created"),
         )
         self.db.add(project)
+        await self.db.flush()
 
         # ── Create project directory structure ─────────────────────
         project_dir = os.path.join(
@@ -102,17 +103,15 @@ class ImportService:
         firmware_entries = self._list_firmware_dirs(zf)
         for old_fw_id_str in firmware_entries:
             await self._import_firmware(zf, old_fw_id_str, new_project_id, id_map)
+        await self.db.flush()
 
-        # ── Import findings ────────────────────────────────────────
+        # ── Import findings, documents, emulation presets ─────────
         await self._import_findings(zf, new_project_id, id_map)
-
-        # ── Import documents ───────────────────────────────────────
         await self._import_documents(zf, new_project_id, id_map)
-
-        # ── Import emulation presets ───────────────────────────────
         await self._import_emulation_presets(zf, new_project_id, id_map)
+        await self.db.flush()
 
-        # ── Import per-firmware data ───────────────────────────────
+        # ── Import per-firmware data (depends on firmware + findings) ──
         for old_fw_id_str in firmware_entries:
             new_fw_id = id_map.get(old_fw_id_str)
             if not new_fw_id:

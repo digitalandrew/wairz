@@ -14,6 +14,7 @@ class ToolContext:
     firmware_id: UUID
     extracted_path: str
     db: AsyncSession
+    extraction_dir: str | None = None
     review_id: UUID | None = None
     review_agent_id: UUID | None = None
 

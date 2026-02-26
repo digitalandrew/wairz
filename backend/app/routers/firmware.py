@@ -98,6 +98,7 @@ async def unpack(
 
     if result.success:
         firmware.extracted_path = result.extracted_path
+        firmware.extraction_dir = result.extraction_dir
         firmware.architecture = result.architecture
         firmware.endianness = result.endianness
         firmware.os_info = result.os_info

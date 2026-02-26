@@ -9,6 +9,7 @@ from elftools.elf.elffile import ELFFile
 @dataclass
 class UnpackResult:
     extracted_path: str | None = None
+    extraction_dir: str | None = None
     architecture: str | None = None
     endianness: str | None = None
     os_info: str | None = None
@@ -49,19 +50,56 @@ async def run_binwalk_extraction(firmware_path: str, output_dir: str, timeout: i
     return stdout.decode(errors="replace").replace("\x00", "")
 
 
+def _has_linux_markers(path: str) -> bool:
+    """Check if a directory has the standard Linux filesystem markers."""
+    try:
+        all_entries = set(os.listdir(path))
+    except OSError:
+        return False
+    has_etc = "etc" in all_entries or "etc_ro" in all_entries
+    has_usr_or_bin = "usr" in all_entries or "bin" in all_entries
+    return has_etc and has_usr_or_bin
+
+
+def _etc_entry_count(path: str) -> int:
+    """Count entries in the etc/ (or etc_ro/) directory as a quality signal."""
+    for name in ("etc", "etc_ro"):
+        etc_path = os.path.join(path, name)
+        if os.path.isdir(etc_path) or os.path.islink(etc_path):
+            try:
+                return len(os.listdir(etc_path))
+            except OSError:
+                return 0
+    return 0
+
+
 def find_filesystem_root(extraction_dir: str) -> str | None:
-    """Find the extracted filesystem root by looking for Linux directory markers."""
-    # Walk all subdirectories looking for one that has /etc and (/usr or /bin)
+    """Find the extracted filesystem root by looking for Linux directory markers.
+
+    Prioritises directories with well-known root names produced by binwalk
+    (e.g. squashfs-root, jffs2-root) and picks the candidate whose etc/
+    directory has the most entries — empty placeholder dirs from overlapping
+    extractions are deprioritised automatically.
+    """
+    candidates: list[tuple[str, int, int]] = []  # (path, priority, etc_count)
+
     for root, dirs, _files in os.walk(extraction_dir):
         # os.walk() only lists real directories in `dirs`, not symlinks.
         # Firmware often has standard dirs as symlinks (e.g. /etc -> /dev/null,
         # /bin -> /usr/bin for merged-usr), so use listdir to see everything.
-        all_entries = set(os.listdir(root))
+        if not _has_linux_markers(root):
+            continue
 
-        has_etc = "etc" in all_entries or "etc_ro" in all_entries
-        has_usr_or_bin = "usr" in all_entries or "bin" in all_entries
-        if has_etc and has_usr_or_bin:
-            return root
+        dirname = os.path.basename(root)
+        # Known binwalk root names get priority boost
+        priority = 10 if dirname in _FS_ROOT_NAMES else 0
+        etc_count = _etc_entry_count(root)
+        candidates.append((root, priority, etc_count))
+
+    if candidates:
+        # Sort by: priority descending, then etc entry count descending
+        candidates.sort(key=lambda c: (c[1], c[2]), reverse=True)
+        return candidates[0][0]
 
     # Fallback: find largest directory by entry count
     best_dir = None
@@ -185,6 +223,87 @@ _FS_IMAGE_EXTENSIONS = frozenset({
     ".romfs",
     ".cpio",
 })
+
+
+import re as _re
+
+_ROOT_DIR_RE = _re.compile(r"^[a-z0-9]+-root(-\d+)?$")
+
+
+def _find_binwalk_output_dir(
+    fs_root_real: str, extraction_dir_real: str
+) -> str | None:
+    """Walk up from the rootfs to find the binwalk output directory.
+
+    The binwalk output dir is the directory that contains the rootfs
+    *and* possibly other extracted partitions (jffs2-root, ext-root, etc.).
+    We walk up from the rootfs toward extraction_dir, and pick the deepest
+    ancestor that contains at least one sibling ``*-root`` directory or
+    other content worth showing at the virtual top level.
+
+    For nested -Me extractions the rootfs can be several levels deep:
+        extracted/_fw.bin.extracted/_100.squashfs.extracted/squashfs-root/
+    In that case we want the ``_100.squashfs.extracted/`` directory so its
+    sibling ``ext-root/`` etc. are visible.
+
+    Returns the binwalk output dir path, or None if the virtual top-level
+    would add no value (e.g. single rootfs with no siblings).
+    """
+    # Walk up from rootfs parent toward (and including) extraction_dir
+    current = os.path.dirname(fs_root_real)
+    rootfs_basename = os.path.basename(fs_root_real)
+    best = None
+
+    while current.startswith(extraction_dir_real):
+        # Check if this directory has interesting siblings / children
+        try:
+            entries = os.listdir(current)
+        except OSError:
+            if current == extraction_dir_real:
+                break
+            current = os.path.dirname(current)
+            continue
+
+        has_other_root = False
+        has_large_file = False
+        for name in entries:
+            if name == rootfs_basename:
+                continue
+            full = os.path.join(current, name)
+            if os.path.isdir(full):
+                if _ROOT_DIR_RE.match(name):
+                    has_other_root = True
+                    break
+                # Also look one level inside subdirectories (for nested
+                # _*.extracted/ dirs that contain *-root directories)
+                try:
+                    for child in os.listdir(full):
+                        child_full = os.path.join(full, child)
+                        if os.path.isdir(child_full) and _ROOT_DIR_RE.match(child):
+                            # Make sure it's not the rootfs itself
+                            if os.path.realpath(child_full) != fs_root_real:
+                                has_other_root = True
+                                break
+                except OSError:
+                    pass
+                if has_other_root:
+                    break
+            elif os.path.isfile(full):
+                try:
+                    if os.path.getsize(full) >= 100_000:
+                        has_large_file = True
+                except OSError:
+                    pass
+
+        if has_other_root or has_large_file:
+            best = current
+            break  # Use the deepest dir with siblings
+
+        if current == extraction_dir_real:
+            break
+        current = os.path.dirname(current)
+
+    return best
 
 
 def detect_kernel(extraction_dir: str, fs_root: str | None) -> str | None:
@@ -314,6 +433,18 @@ async def unpack_firmware(firmware_path: str, output_base_dir: str) -> UnpackRes
         result.error = "Could not locate filesystem root in extracted contents"
         return result
     result.extracted_path = fs_root
+
+    # Step 2b: Determine the binwalk output directory (parent of rootfs).
+    # Walk up from the rootfs to find the directory that contains it and
+    # possibly other extracted partitions (jffs2-root, ext-root, etc.).
+    # This handles both simple layouts (rootfs one level deep) and nested
+    # binwalk -Me extractions (rootfs several levels deep).
+    fs_root_real = os.path.realpath(fs_root)
+    extraction_dir_real = os.path.realpath(extraction_dir)
+    if fs_root_real != extraction_dir_real:
+        result.extraction_dir = _find_binwalk_output_dir(
+            fs_root_real, extraction_dir_real
+        )
 
     # Step 3: Detect architecture
     arch, endian = detect_architecture(fs_root)

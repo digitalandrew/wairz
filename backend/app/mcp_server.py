@@ -261,6 +261,7 @@ async def run_server(project_id: uuid.UUID) -> None:
         architecture = firmware.architecture
         endianness = firmware.endianness
         extracted_path = firmware.extracted_path
+        extraction_dir = firmware.extraction_dir
 
     # Translate Docker-internal paths to host paths when running outside Docker.
     # The DB stores paths like /data/firmware/... which only exist inside
@@ -269,6 +270,8 @@ async def run_server(project_id: uuid.UUID) -> None:
     host_storage_root = _resolve_storage_root()
     if host_storage_root:
         extracted_path = _translate_path(extracted_path, host_storage_root)
+        if extraction_dir:
+            extraction_dir = _translate_path(extraction_dir, host_storage_root)
         logger.info(
             "Path translation active: %s → %s",
             DOCKER_STORAGE_ROOT,
@@ -331,6 +334,7 @@ async def run_server(project_id: uuid.UUID) -> None:
                 firmware_id=firmware_id,
                 extracted_path=extracted_path,
                 db=session,
+                extraction_dir=extraction_dir,
             )
             try:
                 result = await registry.execute(name, arguments, context)

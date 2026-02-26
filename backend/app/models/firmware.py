@@ -24,6 +24,7 @@ class Firmware(Base):
     file_size: Mapped[int | None] = mapped_column(BigInteger)
     storage_path: Mapped[str | None] = mapped_column(String(512))
     extracted_path: Mapped[str | None] = mapped_column(String(512))
+    extraction_dir: Mapped[str | None] = mapped_column(String(512))
     architecture: Mapped[str | None] = mapped_column(String(50))
     endianness: Mapped[str | None] = mapped_column(String(10))
     os_info: Mapped[str | None] = mapped_column(Text)
