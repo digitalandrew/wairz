@@ -337,9 +337,8 @@ async def _handle_generate_dictionary(input: dict, context: ToolContext) -> str:
     if not firmware or not firmware.extracted_path:
         return "Error: firmware not found or not unpacked."
 
-    from app.utils.sandbox import validate_path
     try:
-        full_path = validate_path(firmware.extracted_path, binary_path)
+        full_path = context.resolve_path(binary_path)
     except Exception as exc:
         return f"Error: {exc}"
 

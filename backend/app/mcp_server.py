@@ -141,7 +141,7 @@ async def _handle_save_code_cleanup(
     if not binary_path_arg or not function_name or not cleaned_code:
         return "Error: binary_path, function_name, and cleaned_code are all required."
 
-    full_path = validate_path(context.extracted_path, binary_path_arg)
+    full_path = context.resolve_path(binary_path_arg)
 
     binary_sha256 = await asyncio.get_event_loop().run_in_executor(
         None, _compute_sha256, full_path

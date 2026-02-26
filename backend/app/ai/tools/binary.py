@@ -115,7 +115,7 @@ def _extract_ghidra_error(raw_output: str, script_name: str) -> str:
 
 async def _handle_list_functions(input: dict, context: ToolContext) -> str:
     """List functions found in a binary, sorted by size (largest first)."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     limit = min(input.get("limit", 100), 500)
 
     cache = get_analysis_cache()
@@ -146,7 +146,7 @@ async def _handle_list_functions(input: dict, context: ToolContext) -> str:
 
 async def _handle_disassemble_function(input: dict, context: ToolContext) -> str:
     """Disassemble a function by name."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     function_name = input["function_name"]
     max_insn = input.get("num_instructions", 100)
 
@@ -160,7 +160,7 @@ async def _handle_disassemble_function(input: dict, context: ToolContext) -> str
 
 async def _handle_list_imports(input: dict, context: ToolContext) -> str:
     """List imported symbols, grouped by library."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
 
     cache = get_analysis_cache()
     imports = await cache.get_imports(path, context.firmware_id, context.db)
@@ -187,7 +187,7 @@ async def _handle_list_imports(input: dict, context: ToolContext) -> str:
 
 async def _handle_list_exports(input: dict, context: ToolContext) -> str:
     """List exported symbols."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
 
     cache = get_analysis_cache()
     exports = await cache.get_exports(path, context.firmware_id, context.db)
@@ -206,7 +206,7 @@ async def _handle_list_exports(input: dict, context: ToolContext) -> str:
 
 async def _handle_xrefs_to(input: dict, context: ToolContext) -> str:
     """Get cross-references to an address or symbol."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     target = input["address_or_symbol"]
 
     cache = get_analysis_cache()
@@ -228,7 +228,7 @@ async def _handle_xrefs_to(input: dict, context: ToolContext) -> str:
 
 async def _handle_xrefs_from(input: dict, context: ToolContext) -> str:
     """Get cross-references from an address or symbol."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     target = input["address_or_symbol"]
 
     cache = get_analysis_cache()
@@ -250,7 +250,7 @@ async def _handle_xrefs_from(input: dict, context: ToolContext) -> str:
 
 async def _handle_get_binary_info(input: dict, context: ToolContext) -> str:
     """Get binary metadata: architecture, format, entry point, etc."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
 
     cache = get_analysis_cache()
     info = await cache.get_binary_info(path, context.firmware_id, context.db)
@@ -285,7 +285,7 @@ async def _handle_check_binary_protections(
     input: dict, context: ToolContext
 ) -> str:
     """Check binary security protections (NX, RELRO, canary, PIE, Fortify)."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
 
     protections = check_binary_protections(path)
 
@@ -328,7 +328,7 @@ async def _handle_check_binary_protections(
 
 async def _handle_decompile_function(input: dict, context: ToolContext) -> str:
     """Decompile a function using Ghidra headless, returning pseudo-C output."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     function_name = input["function_name"]
 
     try:
@@ -350,7 +350,7 @@ async def _handle_decompile_function(input: dict, context: ToolContext) -> str:
 
 async def _handle_find_string_refs(input: dict, context: ToolContext) -> str:
     """Find functions referencing strings matching a pattern."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     pattern = input["pattern"]
 
     cache = get_analysis_cache()
@@ -427,9 +427,9 @@ async def _handle_find_string_refs(input: dict, context: ToolContext) -> str:
 
 async def _handle_resolve_import(input: dict, context: ToolContext) -> str:
     """Find the library implementing a function and decompile it."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     function_name = input["function_name"]
-    real_root = os.path.realpath(context.extracted_path)
+    real_root = context.real_root_for(input["binary_path"])
 
     # Step 1: Parse DT_NEEDED from the target binary
     try:
@@ -509,8 +509,9 @@ async def _handle_check_all_binary_protections(
     input: dict, context: ToolContext,
 ) -> str:
     """Scan all ELF binaries and report their security protections."""
-    search_path = validate_path(context.extracted_path, input.get("path", "/"))
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path", "/")
+    search_path = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
 
     ELF_MAGIC = b"\x7fELF"
     results: list[dict] = []
@@ -632,7 +633,7 @@ async def _handle_check_all_binary_protections(
 
 async def _handle_trace_dataflow(input: dict, context: ToolContext) -> str:
     """Trace source-to-sink dataflow paths in a binary."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     sources = input.get("sources", _DEFAULT_SOURCES)
     sinks = input.get("sinks", _DEFAULT_SINKS)
 
@@ -735,7 +736,7 @@ async def _handle_trace_dataflow(input: dict, context: ToolContext) -> str:
 
 async def _handle_find_callers(input: dict, context: ToolContext) -> str:
     """Find all functions that call the target function."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     target = input["function_name"]
     include_aliases = input.get("include_aliases", True)
 
@@ -809,7 +810,7 @@ async def _handle_find_callers(input: dict, context: ToolContext) -> str:
 
 async def _handle_search_binary_content(input: dict, context: ToolContext) -> str:
     """Search for byte patterns, strings, or disassembly patterns in a binary."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     mode = input.get("mode", "string")
     pattern = input["pattern"]
     max_results = min(input.get("max_results", 50), 100)
@@ -956,7 +957,7 @@ async def _handle_search_binary_content(input: dict, context: ToolContext) -> st
 
 async def _handle_get_stack_layout(input: dict, context: ToolContext) -> str:
     """Get annotated stack frame layout for a function."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     function_name = input["function_name"]
 
     cache = get_analysis_cache()
@@ -1047,7 +1048,7 @@ async def _handle_get_stack_layout(input: dict, context: ToolContext) -> str:
 
 async def _handle_get_global_layout(input: dict, context: ToolContext) -> str:
     """Get global variable layout around a target symbol."""
-    path = validate_path(context.extracted_path, input["binary_path"])
+    path = context.resolve_path(input["binary_path"])
     symbol_name = input["symbol_name"]
 
     cache = get_analysis_cache()
@@ -1122,8 +1123,9 @@ async def _handle_get_global_layout(input: dict, context: ToolContext) -> str:
 
 async def _handle_cross_binary_dataflow(input: dict, context: ToolContext) -> str:
     """Trace data flows across binaries via IPC mechanisms (nvram, config, files)."""
-    search_path = validate_path(context.extracted_path, input.get("path", "/"))
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path", "/")
+    search_path = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
     mechanisms = input.get("mechanisms")  # Optional filter
 
     ELF_MAGIC = b"\x7fELF"

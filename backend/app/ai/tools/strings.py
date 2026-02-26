@@ -172,7 +172,7 @@ def _is_text_file(path: str) -> bool:
 
 async def _handle_extract_strings(input: dict, context: ToolContext) -> str:
     """Extract and categorize interesting strings from a file."""
-    path = validate_path(context.extracted_path, input["path"])
+    path = context.resolve_path(input["path"])
     min_length = input.get("min_length", 6)
 
     if not os.path.isfile(path):
@@ -215,8 +215,9 @@ async def _handle_extract_strings(input: dict, context: ToolContext) -> str:
 async def _handle_search_strings(input: dict, context: ToolContext) -> str:
     """Search for a regex pattern across firmware filesystem files."""
     pattern = input["pattern"]
-    search_path = validate_path(context.extracted_path, input.get("path", "/"))
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path", "/")
+    search_path = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
 
     try:
         stdout, _ = await _run_subprocess(
@@ -257,8 +258,9 @@ async def _handle_search_strings(input: dict, context: ToolContext) -> str:
 
 async def _handle_find_crypto_material(input: dict, context: ToolContext) -> str:
     """Find cryptographic keys, certificates, and related files."""
-    search_path = validate_path(context.extracted_path, input.get("path", "/"))
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path", "/")
+    search_path = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
 
     findings: dict[str, list[str]] = {
         "private_keys": [],
@@ -475,8 +477,9 @@ async def _handle_find_hardcoded_credentials(
     input: dict, context: ToolContext
 ) -> str:
     """Find hardcoded passwords, API keys, tokens, and other credentials."""
-    search_path = validate_path(context.extracted_path, input.get("path", "/"))
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path", "/")
+    search_path = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
 
     results: list[dict[str, str]] = []
     auth_issues: list[str] = []

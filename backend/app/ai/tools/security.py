@@ -187,7 +187,7 @@ _CONFIG_CHECKS: list[tuple[str, str, re.Pattern, str, str]] = [
 async def _handle_analyze_config_security(input: dict, context: ToolContext) -> str:
     """Analyze a specific config file for common insecure settings."""
     path = input["path"]
-    full_path = validate_path(context.extracted_path, path)
+    full_path = context.resolve_path(path)
 
     if not os.path.isfile(full_path):
         return f"Error: '{path}' is not a file."
@@ -247,8 +247,9 @@ async def _handle_analyze_config_security(input: dict, context: ToolContext) -> 
 
 async def _handle_check_setuid_binaries(input: dict, context: ToolContext) -> str:
     """Find all setuid/setgid files in the firmware filesystem."""
-    search_root = _walk_firmware(context.extracted_path, input.get("path"))
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path") or "/"
+    search_root = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
 
     setuid_files: list[str] = []
     setgid_files: list[str] = []
@@ -335,8 +336,9 @@ _KNOWN_SERVICES = {
 
 async def _handle_analyze_init_scripts(input: dict, context: ToolContext) -> str:
     """Parse init scripts and inittab to identify services started at boot."""
-    real_root = os.path.realpath(context.extracted_path)
-    search_root = _walk_firmware(context.extracted_path, input.get("path"))
+    input_path = input.get("path") or "/"
+    real_root = context.real_root_for(input_path)
+    search_root = context.resolve_path(input_path)
 
     services: list[str] = []
     raw_entries: list[str] = []
@@ -452,8 +454,9 @@ _SENSITIVE_PATTERNS = re.compile(
 
 async def _handle_check_filesystem_permissions(input: dict, context: ToolContext) -> str:
     """Check for world-writable files and weak permissions on sensitive files."""
-    search_root = _walk_firmware(context.extracted_path, input.get("path"))
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path") or "/"
+    search_root = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
 
     world_writable: list[str] = []
     sensitive_weak: list[str] = []
@@ -716,11 +719,13 @@ def _audit_certificate(cert_data: bytes, file_path: str, real_root: str) -> dict
 
 async def _handle_analyze_certificate(input: dict, context: ToolContext) -> str:
     """Parse and audit X.509 certificates found in the firmware."""
-    real_root = os.path.realpath(context.extracted_path)
+    input_path = input.get("path") or "/"
+    real_root = context.real_root_for(input_path)
     search_path = input.get("path")
 
-    # Find certificate files
-    cert_files = _find_cert_files(context.extracted_path, search_path)
+    # Resolve the extracted root for cert file searching
+    resolved_root = context.resolve_path("/")
+    cert_files = _find_cert_files(resolved_root, search_path)
 
     if not cert_files:
         return "No certificate files found in the firmware filesystem."

@@ -74,13 +74,11 @@ def _matches_type(filepath: str, name: str, file_type: str) -> bool:
     return False
 
 
-def _find_files_by_type(extracted_root: str, file_type: str, path: str | None) -> str:
+def _find_files_by_type(search_root: str, real_root: str, file_type: str) -> str:
     """Walk filesystem and find files matching the requested type."""
     if file_type not in VALID_TYPES:
         return f"Error: unknown file type '{file_type}'. Valid types: {', '.join(sorted(VALID_TYPES))}"
 
-    search_root = validate_path(extracted_root, path or "/")
-    real_root = os.path.realpath(extracted_root)
     matches: list[str] = []
 
     for dirpath, _dirs, files in safe_walk(search_root):
@@ -182,10 +180,13 @@ async def _handle_search_files(input: dict, context: ToolContext) -> str:
 
 
 async def _handle_find_files_by_type(input: dict, context: ToolContext) -> str:
+    input_path = input.get("path") or "/"
+    search_root = context.resolve_path(input_path)
+    real_root = context.real_root_for(input_path)
     return _find_files_by_type(
-        extracted_root=context.extracted_path,
+        search_root=search_root,
+        real_root=real_root,
         file_type=input["file_type"],
-        path=input.get("path"),
     )
 
 
