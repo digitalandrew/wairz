@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
 from app.config import get_settings
-from app.routers import analysis, comparison, component_map, documents, emulation, export_import, files, findings, firmware, fuzzing, kernels, projects, sbom, terminal
+from app.routers import analysis, comparison, component_map, documents, emulation, export_import, files, findings, firmware, fuzzing, kernels, projects, sbom, terminal, uart
 from app.utils.sandbox import PathTraversalError
 
 
@@ -48,6 +48,7 @@ app.include_router(fuzzing.router)
 app.include_router(kernels.router)
 app.include_router(comparison.router)
 app.include_router(export_import.router)
+app.include_router(uart.router)
 
 
 @app.exception_handler(PathTraversalError)

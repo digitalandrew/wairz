@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     fuzzing_memory_limit_mb: int = 2048
     fuzzing_cpu_limit: float = 2.0
     fuzzing_data_dir: str = "/data/fuzzing"
+    uart_bridge_host: str = "host.docker.internal"
+    uart_bridge_port: int = 9999
+    uart_command_timeout: int = 30
     log_level: str = "INFO"
 
 

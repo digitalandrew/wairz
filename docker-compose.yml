@@ -48,6 +48,10 @@ services:
       EMULATION_IMAGE: wairz-emulation
       EMULATION_NETWORK: wairz_emulation_net
       FUZZING_IMAGE: wairz-fuzzing
+      UART_BRIDGE_HOST: host.docker.internal
+      UART_BRIDGE_PORT: "9999"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - firmware_data:/data/firmware
       - ./ghidra/scripts:/opt/ghidra_scripts:ro
