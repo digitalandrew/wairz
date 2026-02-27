@@ -66,6 +66,16 @@ export default function ProjectDetailPage() {
     }
   }, [project, projectId])
 
+  // Poll for status updates while unpacking (matches EmulationPage pattern)
+  useEffect(() => {
+    if (!projectId || project?.status !== 'unpacking') return
+    const interval = setInterval(() => {
+      fetchProject(projectId)
+      listFirmware(projectId).then(setFirmwareList).catch(() => {})
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [projectId, project?.status, fetchProject])
+
   if (loading || !project) {
     return (
       <div className="flex items-center gap-2 py-12 justify-center text-muted-foreground">

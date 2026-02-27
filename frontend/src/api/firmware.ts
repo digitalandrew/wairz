@@ -60,8 +60,6 @@ export async function unpackFirmware(
 ): Promise<FirmwareDetail> {
   const { data } = await apiClient.post<FirmwareDetail>(
     `/projects/${projectId}/firmware/${firmwareId}/unpack`,
-    null,
-    { timeout: 600_000 },
   )
   return data
 }

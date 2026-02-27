@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
-type Phase = 'idle' | 'uploading' | 'unpacking' | 'done' | 'error'
+type Phase = 'idle' | 'uploading' | 'done' | 'error'
 
 interface FirmwareUploadProps {
   projectId: string
@@ -39,9 +39,9 @@ export default function FirmwareUpload({ projectId, onComplete, showVersionLabel
           (pct) => setStore({ uploadProgress: pct }),
         )
         setStore({ uploading: false, uploadProgress: 100 })
-        setPhase('unpacking')
-        await apiUnpackFirmware(projectId, fw.id)
-        // Refresh project
+        // Fire-and-forget: unpack returns 202 immediately, polling handles the rest
+        apiUnpackFirmware(projectId, fw.id).catch(() => {})
+        // Refresh project to pick up "unpacking" status
         const project = await getProject(projectId)
         setStore({ currentProject: project })
         setPhase('done')
@@ -82,7 +82,7 @@ export default function FirmwareUpload({ projectId, onComplete, showVersionLabel
     return (
       <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-8">
         <CheckCircle className="h-8 w-8 text-green-500" />
-        <p className="text-sm font-medium">Firmware unpacked successfully</p>
+        <p className="text-sm font-medium">Firmware uploaded — unpacking in progress</p>
       </div>
     )
   }
@@ -106,16 +106,6 @@ export default function FirmwareUpload({ projectId, onComplete, showVersionLabel
         <p className="text-sm font-medium">Uploading firmware...</p>
         <Progress value={uploadProgress} className="w-full max-w-xs" />
         <p className="text-xs text-muted-foreground">{uploadProgress}%</p>
-      </div>
-    )
-  }
-
-  if (phase === 'unpacking') {
-    return (
-      <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-8">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        <p className="text-sm font-medium">Unpacking firmware...</p>
-        <p className="text-xs text-muted-foreground">This may take a minute</p>
       </div>
     )
   }

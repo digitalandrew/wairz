@@ -98,6 +98,7 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
     set({ unpacking: true, error: null })
     try {
       await apiUnpackFirmware(projectId, firmwareId)
+      // Endpoint returns 202 immediately; refresh project to show "unpacking" status
       const project = await getProject(projectId)
       set({ unpacking: false, currentProject: project })
       syncProjectInList(set, get, project)

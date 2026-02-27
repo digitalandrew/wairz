@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import uuid
 
@@ -5,7 +7,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import async_session_factory, get_db
 from app.models.firmware import Firmware
 from app.models.project import Project
 from app.schemas.firmware import (
@@ -16,6 +18,8 @@ from app.schemas.firmware import (
 from app.services.firmware_metadata_service import FirmwareMetadataService
 from app.services.firmware_service import FirmwareService
 from app.workers.unpack import detect_kernel, unpack_firmware
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/firmware", tags=["firmware"])
 
@@ -68,7 +72,7 @@ async def delete_firmware(
     await service.delete(firmware)
 
 
-@router.post("/{firmware_id}/unpack", response_model=FirmwareDetailResponse)
+@router.post("/{firmware_id}/unpack", response_model=FirmwareDetailResponse, status_code=202)
 async def unpack(
     project_id: uuid.UUID,
     firmware_id: uuid.UUID,
@@ -88,29 +92,80 @@ async def unpack(
     if firmware.extracted_path:
         raise HTTPException(409, "Firmware already unpacked")
 
+    if project.status == "unpacking":
+        raise HTTPException(409, "Firmware is already being unpacked")
+
     # Update status to unpacking
     project.status = "unpacking"
     await db.flush()
 
-    # Run unpacking
-    output_base = os.path.dirname(firmware.storage_path)
-    result = await unpack_firmware(firmware.storage_path, output_base)
+    # Launch background task (uses its own DB session)
+    asyncio.create_task(
+        _run_unpack_background(project_id, firmware_id, firmware.storage_path)
+    )
 
-    if result.success:
-        firmware.extracted_path = result.extracted_path
-        firmware.extraction_dir = result.extraction_dir
-        firmware.architecture = result.architecture
-        firmware.endianness = result.endianness
-        firmware.os_info = result.os_info
-        firmware.kernel_path = result.kernel_path
-        firmware.unpack_log = result.unpack_log
-        project.status = "ready"
-    else:
-        firmware.unpack_log = result.unpack_log
-        project.status = "error"
-
-    await db.flush()
     return firmware
+
+
+async def _run_unpack_background(
+    project_id: uuid.UUID,
+    firmware_id: uuid.UUID,
+    storage_path: str,
+) -> None:
+    """Run firmware unpacking in the background with its own DB session."""
+    try:
+        output_base = os.path.dirname(storage_path)
+        result = await unpack_firmware(storage_path, output_base)
+
+        async with async_session_factory() as db:
+            try:
+                proj_result = await db.execute(
+                    select(Project).where(Project.id == project_id)
+                )
+                project = proj_result.scalar_one_or_none()
+                fw_result = await db.execute(
+                    select(Firmware).where(Firmware.id == firmware_id)
+                )
+                firmware = fw_result.scalar_one_or_none()
+
+                if not project or not firmware:
+                    logger.error("Background unpack: project or firmware not found")
+                    return
+
+                if result.success:
+                    firmware.extracted_path = result.extracted_path
+                    firmware.extraction_dir = result.extraction_dir
+                    firmware.architecture = result.architecture
+                    firmware.endianness = result.endianness
+                    firmware.os_info = result.os_info
+                    firmware.kernel_path = result.kernel_path
+                    firmware.unpack_log = result.unpack_log
+                    project.status = "ready"
+                else:
+                    firmware.unpack_log = result.unpack_log
+                    project.status = "error"
+
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+    except Exception:
+        logger.exception("Background firmware unpack failed for firmware %s", firmware_id)
+        # Try to set error status
+        try:
+            async with async_session_factory() as db:
+                try:
+                    proj_result = await db.execute(
+                        select(Project).where(Project.id == project_id)
+                    )
+                    project = proj_result.scalar_one_or_none()
+                    if project:
+                        project.status = "error"
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+        except Exception:
+            logger.exception("Failed to set error status for project %s", project_id)
 
 
 @router.post("/{firmware_id}/redetect-kernel", response_model=FirmwareDetailResponse)
@@ -160,7 +215,7 @@ async def get_firmware_metadata(
 # These use the first/only firmware for the project, preserving existing behavior.
 
 
-@router.post("/unpack", response_model=FirmwareDetailResponse, deprecated=True)
+@router.post("/unpack", response_model=FirmwareDetailResponse, status_code=202, deprecated=True)
 async def unpack_legacy(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
