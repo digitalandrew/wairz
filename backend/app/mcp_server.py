@@ -6,6 +6,9 @@ Usage:
 Connects to the Wairz database, loads the specified project and firmware,
 then serves all registered analysis tools over stdio for MCP-compatible
 clients (Claude Desktop, Claude Code, etc.).
+
+Supports dynamic project switching via the switch_project tool — no need
+to restart the MCP server process when changing projects.
 """
 
 import argparse
@@ -15,6 +18,7 @@ import logging
 import os
 import sys
 import uuid
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -56,6 +60,26 @@ logger = logging.getLogger("wairz.mcp")
 
 # Tools that should NOT be exposed via MCP (currently none after orchestrator removal).
 EXCLUDED_TOOLS: set[str] = set()
+
+
+@dataclass
+class ProjectState:
+    """Mutable container for the active project/firmware context.
+
+    All MCP handler closures reference a single instance of this class.
+    The switch_project tool updates it in-place to change the active project
+    without restarting the MCP server process.
+    """
+
+    project_id: uuid.UUID = field(default_factory=lambda: uuid.UUID(int=0))
+    project_name: str = ""
+    project_desc: str = ""
+    firmware_id: uuid.UUID = field(default_factory=lambda: uuid.UUID(int=0))
+    firmware_filename: str = "unknown"
+    architecture: str | None = None
+    endianness: str | None = None
+    extracted_path: str = ""
+    extraction_dir: str | None = None
 
 
 def _resolve_storage_root() -> str | None:
@@ -221,23 +245,45 @@ async def _load_project(
     """Load and validate the project and its firmware."""
     project = await session.get(Project, project_id)
     if not project:
-        logger.error("Project %s not found.", project_id)
-        sys.exit(1)
+        raise ValueError(f"Project {project_id} not found.")
 
     stmt = select(Firmware).where(Firmware.project_id == project_id)
     firmware = (await session.execute(stmt)).scalar_one_or_none()
     if not firmware:
-        logger.error("No firmware found for project %s.", project_id)
-        sys.exit(1)
+        raise ValueError(f"No firmware found for project {project_id}.")
 
     if not firmware.extracted_path:
-        logger.error(
-            "Firmware for project %s has not been unpacked (no extracted_path).",
-            project_id,
+        raise ValueError(
+            f"Firmware for project {project_id} has not been unpacked (no extracted_path)."
         )
-        sys.exit(1)
 
     return project, firmware
+
+
+async def _load_project_state(
+    session_factory: async_sessionmaker,
+    project_id: uuid.UUID,
+    state: ProjectState,
+    host_storage_root: str | None,
+) -> None:
+    """Load project data from DB into the mutable state object."""
+    async with session_factory() as session:
+        project, firmware = await _load_project(session, project_id)
+        state.project_id = project.id
+        state.project_name = project.name
+        state.project_desc = project.description or ""
+        state.firmware_id = firmware.id
+        state.firmware_filename = firmware.original_filename or "unknown"
+        state.architecture = firmware.architecture
+        state.endianness = firmware.endianness
+        state.extracted_path = firmware.extracted_path
+        state.extraction_dir = firmware.extraction_dir
+
+    # Apply path translation
+    if host_storage_root:
+        state.extracted_path = _translate_path(state.extracted_path, host_storage_root)
+        if state.extraction_dir:
+            state.extraction_dir = _translate_path(state.extraction_dir, host_storage_root)
 
 
 async def run_server(project_id: uuid.UUID) -> None:
@@ -250,38 +296,30 @@ async def run_server(project_id: uuid.UUID) -> None:
         engine, class_=AsyncSession, expire_on_commit=False
     )
 
-    # Validate project exists and firmware is unpacked
-    async with session_factory() as session:
-        project, firmware = await _load_project(session, project_id)
-        # Capture values before session closes
-        project_name = project.name
-        project_desc = project.description or ""
-        firmware_id = firmware.id
-        firmware_filename = firmware.original_filename or "unknown"
-        architecture = firmware.architecture
-        endianness = firmware.endianness
-        extracted_path = firmware.extracted_path
-        extraction_dir = firmware.extraction_dir
-
-    # Translate Docker-internal paths to host paths when running outside Docker.
-    # The DB stores paths like /data/firmware/... which only exist inside
-    # the Docker container.  On the host we resolve via the Docker volume
-    # or the local STORAGE_ROOT setting.
+    # Resolve host-side storage root once at startup
     host_storage_root = _resolve_storage_root()
     if host_storage_root:
-        extracted_path = _translate_path(extracted_path, host_storage_root)
-        if extraction_dir:
-            extraction_dir = _translate_path(extraction_dir, host_storage_root)
         logger.info(
             "Path translation active: %s → %s",
             DOCKER_STORAGE_ROOT,
             host_storage_root,
         )
 
-    if not os.path.isdir(extracted_path):
+    # Mutable state object — all closures reference this single instance.
+    # switch_project updates it in-place.
+    state = ProjectState()
+
+    # Load initial project
+    try:
+        await _load_project_state(session_factory, project_id, state, host_storage_root)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
+
+    if not os.path.isdir(state.extracted_path):
         logger.error(
             "Extracted firmware path does not exist: %s",
-            extracted_path,
+            state.extracted_path,
         )
         logger.error(
             "The database stores Docker-internal paths. To fix this, either:\n"
@@ -294,15 +332,158 @@ async def run_server(project_id: uuid.UUID) -> None:
 
     logger.info(
         "Loaded project '%s' — firmware: %s (%s, %s)",
-        project_name,
-        firmware_filename,
-        architecture or "unknown arch",
-        endianness or "unknown endian",
+        state.project_name,
+        state.firmware_filename,
+        state.architecture or "unknown arch",
+        state.endianness or "unknown endian",
     )
-    logger.info("Firmware root: %s", extracted_path)
+    logger.info("Firmware root: %s", state.extracted_path)
 
     # Build tool registry
     registry = _build_tool_registry()
+
+    # --- Register MCP-only project management tools ---
+
+    async def _handle_get_project_info(input: dict, context: ToolContext) -> str:
+        """Return info about the currently active project."""
+        lines = [
+            f"Project: {state.project_name}",
+            f"Project ID: {state.project_id}",
+            f"Description: {state.project_desc or '(none)'}",
+            f"Firmware: {state.firmware_filename}",
+            f"Firmware ID: {state.firmware_id}",
+            f"Architecture: {state.architecture or 'unknown'}",
+            f"Endianness: {state.endianness or 'unknown'}",
+            f"Extracted Path: {state.extracted_path}",
+        ]
+        return "\n".join(lines)
+
+    registry.register(
+        name="get_project_info",
+        description=(
+            "Get information about the currently active Wairz project. "
+            "Returns the project name, ID, firmware details, and architecture. "
+            "Use this to verify which project the MCP server is connected to."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        handler=_handle_get_project_info,
+    )
+
+    async def _handle_switch_project(input: dict, context: ToolContext) -> str:
+        """Switch the MCP server to a different project without restarting."""
+        new_project_id_str = input.get("project_id", "")
+        if not new_project_id_str:
+            return "Error: project_id is required."
+
+        try:
+            new_project_id = uuid.UUID(new_project_id_str)
+        except ValueError:
+            return f"Error: '{new_project_id_str}' is not a valid UUID."
+
+        if new_project_id == state.project_id:
+            return (
+                f"Already connected to project '{state.project_name}' "
+                f"({state.project_id})."
+            )
+
+        old_name = state.project_name
+        old_id = state.project_id
+
+        try:
+            await _load_project_state(
+                session_factory, new_project_id, state, host_storage_root
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
+
+        if not os.path.isdir(state.extracted_path):
+            # Revert to old project
+            try:
+                await _load_project_state(
+                    session_factory, old_id, state, host_storage_root
+                )
+            except ValueError:
+                pass
+            return (
+                f"Error: Extracted firmware path does not exist: {state.extracted_path}\n"
+                f"Reverted to project '{old_name}'."
+            )
+
+        logger.info(
+            "Switched project: '%s' (%s) → '%s' (%s)",
+            old_name,
+            old_id,
+            state.project_name,
+            state.project_id,
+        )
+
+        lines = [
+            f"Switched to project '{state.project_name}'.",
+            f"  Project ID: {state.project_id}",
+            f"  Firmware: {state.firmware_filename}",
+            f"  Architecture: {state.architecture or 'unknown'}",
+            f"  Endianness: {state.endianness or 'unknown'}",
+        ]
+        return "\n".join(lines)
+
+    registry.register(
+        name="switch_project",
+        description=(
+            "Switch the MCP server to a different Wairz project without restarting. "
+            "Takes a project UUID and reloads all context (firmware, paths, metadata). "
+            "Use this when you need to analyze a different project. "
+            "Call get_project_info afterwards to confirm the switch."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "UUID of the project to switch to.",
+                },
+            },
+            "required": ["project_id"],
+        },
+        handler=_handle_switch_project,
+    )
+
+    async def _handle_list_projects(input: dict, context: ToolContext) -> str:
+        """List all available projects."""
+        async with session_factory() as session:
+            stmt = select(Project).order_by(Project.created_at.desc())
+            result = await session.execute(stmt)
+            projects = result.scalars().all()
+
+        if not projects:
+            return "No projects found."
+
+        lines = [f"Available projects ({len(projects)}):"]
+        for p in projects:
+            marker = " ← active" if p.id == state.project_id else ""
+            lines.append(
+                f"  {p.id}  {p.name}  ({p.status}){marker}"
+            )
+        lines.append("")
+        lines.append("Use switch_project with a project ID to change the active project.")
+        return "\n".join(lines)
+
+    registry.register(
+        name="list_projects",
+        description=(
+            "List all available Wairz projects with their IDs and status. "
+            "The currently active project is marked. "
+            "Use switch_project to change to a different project."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        handler=_handle_list_projects,
+    )
+
     tool_count = len(registry._tools)
     logger.info("Registered %d tools.", tool_count)
 
@@ -330,11 +511,11 @@ async def run_server(project_id: uuid.UUID) -> None:
     ) -> list[TextContent]:
         async with session_factory() as session:
             context = ToolContext(
-                project_id=project_id,
-                firmware_id=firmware_id,
-                extracted_path=extracted_path,
+                project_id=state.project_id,
+                firmware_id=state.firmware_id,
+                extracted_path=state.extracted_path,
                 db=session,
-                extraction_dir=extraction_dir,
+                extraction_dir=state.extraction_dir,
             )
             try:
                 result = await registry.execute(name, arguments, context)
@@ -360,14 +541,14 @@ async def run_server(project_id: uuid.UUID) -> None:
     async def read_resource(uri) -> str:
         if str(uri) == "wairz://project/info":
             lines = [
-                f"Project: {project_name}",
-                f"Description: {project_desc}",
-                f"Project ID: {project_id}",
-                f"Firmware: {firmware_filename}",
-                f"Firmware ID: {firmware_id}",
-                f"Architecture: {architecture or 'unknown'}",
-                f"Endianness: {endianness or 'unknown'}",
-                f"Extracted Path: {extracted_path}",
+                f"Project: {state.project_name}",
+                f"Description: {state.project_desc}",
+                f"Project ID: {state.project_id}",
+                f"Firmware: {state.firmware_filename}",
+                f"Firmware ID: {state.firmware_id}",
+                f"Architecture: {state.architecture or 'unknown'}",
+                f"Endianness: {state.endianness or 'unknown'}",
+                f"Extracted Path: {state.extracted_path}",
             ]
             return "\n".join(lines)
         raise ValueError(f"Unknown resource: {uri}")
@@ -391,11 +572,11 @@ async def run_server(project_id: uuid.UUID) -> None:
     ) -> GetPromptResult:
         if name == "firmware-analysis":
             prompt_text = build_system_prompt(
-                project_name=project_name,
-                firmware_filename=firmware_filename,
-                architecture=architecture,
-                endianness=endianness,
-                extracted_path=extracted_path,
+                project_name=state.project_name,
+                firmware_filename=state.firmware_filename,
+                architecture=state.architecture,
+                endianness=state.endianness,
+                extracted_path=state.extracted_path,
             )
             return GetPromptResult(
                 description="Wairz firmware analysis system prompt",

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Copy, Check, Terminal } from 'lucide-react'
+import { Copy, Check, Terminal, Usb } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import PromptSnippet from '@/components/ui/PromptSnippet'
@@ -33,6 +33,8 @@ export default function McpConnectionCard({ projectId }: McpConnectionCardProps)
   const containerName = 'wairz-backend-1'
 
   const claudeCodeCmd = `claude mcp add wairz -- docker exec -i ${containerName} uv run wairz-mcp --project-id ${projectId}`
+
+  const uartBridgeCmd = 'python scripts/wairz-uart-bridge.py --bind 0.0.0.0 --port 9999'
 
   const claudeDesktopConfig = JSON.stringify(
     {
@@ -133,6 +135,56 @@ export default function McpConnectionCard({ projectId }: McpConnectionCardProps)
           The MCP server runs inside the Wairz backend Docker container.
           Make sure the container is running before connecting.
         </p>
+
+        {/* UART Bridge */}
+        <div className="space-y-2 border-t pt-4">
+          <div className="flex items-center gap-2">
+            <Usb className="h-4 w-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Live Device UART Console</span>
+            <span className="text-xs bg-muted px-1.5 py-0.5 rounded text-muted-foreground">Optional</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            To interact with a physical device's serial console via the AI assistant,
+            run the UART bridge on the host machine where the USB-UART adapter is plugged in.
+            The bridge exposes the serial port to the MCP tools running inside Docker.
+          </p>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">1. Install dependency</span>
+              <CopyButton text="pip install pyserial" id="uart-pip" />
+            </div>
+            <pre className="rounded bg-muted p-2.5 text-xs overflow-x-auto whitespace-pre-wrap break-all">
+              pip install pyserial
+            </pre>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">2. Start the bridge</span>
+              <CopyButton text={uartBridgeCmd} id="uart-bridge" />
+            </div>
+            <pre className="rounded bg-muted p-2.5 text-xs overflow-x-auto whitespace-pre-wrap break-all">
+              {uartBridgeCmd}
+            </pre>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            The bridge must bind to <code className="bg-muted px-1 rounded">0.0.0.0</code> so
+            the Docker container can reach it. Once running, Claude can use UART tools
+            (<code className="bg-muted px-1 rounded">uart_connect</code>,{' '}
+            <code className="bg-muted px-1 rounded">uart_send_command</code>, etc.)
+            to interact with the device.
+          </p>
+
+          <p className="text-xs text-muted-foreground">
+            Common serial devices:{' '}
+            <code className="bg-muted px-1 rounded">/dev/ttyUSB0</code>,{' '}
+            <code className="bg-muted px-1 rounded">/dev/ttyACM0</code>.{' '}
+            Your user must be in the <code className="bg-muted px-1 rounded">dialout</code> group
+            to access serial ports without sudo.
+          </p>
+        </div>
       </CardContent>
     </Card>
   )
