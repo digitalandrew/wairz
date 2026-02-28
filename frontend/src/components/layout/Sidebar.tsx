@@ -31,7 +31,7 @@ const projectSubPages = [
   { suffix: '/map', label: 'Component Map', icon: Network },
   { suffix: '/sbom', label: 'SBOM', icon: Package },
   { suffix: '/emulation', label: 'Emulation (experimental)', icon: PlayCircle },
-  { suffix: '/fuzzing', label: 'Fuzzing', icon: Bug },
+  { suffix: '/fuzzing', label: 'Fuzzing (experimental)', icon: Bug },
   { suffix: '/compare', label: 'Compare', icon: GitCompareArrows },
 ]
 
@@ -214,7 +214,15 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </NavLink>
       </div>
       <div className="px-4 py-3 text-xs text-muted-foreground">
-        Firmware Security Analysis
+        Created by{' '}
+        <a
+          href="https://digitalandrew.io"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline hover:text-sidebar-foreground"
+        >
+          DigitalAndrew
+        </a>
       </div>
     </aside>
   )
