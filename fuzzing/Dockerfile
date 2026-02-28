@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y \
     libtool libtool-bin automake bison flex \
     libglib2.0-dev libpixman-1-dev \
     ninja-build meson pkg-config wget ca-certificates \
+    gcc-mipsel-linux-gnu gcc-mips-linux-gnu \
+    gcc-arm-linux-gnueabi gcc-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone AFL++ stable branch
@@ -51,6 +53,16 @@ RUN cd qemu_mode && CPU_TARGET=aarch64 ./build_qemu_support.sh \
 # x86 (32-bit)
 RUN cd qemu_mode && CPU_TARGET=i386 ./build_qemu_support.sh \
     && cp ../afl-qemu-trace /usr/local/bin/afl-qemu-trace-i386
+
+# Cross-compile desock library for all target architectures.
+# This LD_PRELOAD library intercepts socket calls and redirects network I/O
+# to stdin/stdout, allowing AFL++ to fuzz network daemons directly.
+COPY desock/ /desock/
+RUN mkdir -p /opt/desock && \
+    mipsel-linux-gnu-gcc -fPIC -shared -Wl,--hash-style=sysv -o /opt/desock/desock_mipsel.so /desock/desock.c && \
+    mips-linux-gnu-gcc   -fPIC -shared -Wl,--hash-style=sysv -o /opt/desock/desock_mips.so   /desock/desock.c && \
+    arm-linux-gnueabi-gcc -fPIC -shared -Wl,--hash-style=sysv -o /opt/desock/desock_arm.so   /desock/desock.c && \
+    aarch64-linux-gnu-gcc -fPIC -shared -Wl,--hash-style=sysv -o /opt/desock/desock_aarch64.so /desock/desock.c
 
 # ---------------------------------------------------------------------------
 # Stage 2: Lean runtime image
@@ -87,6 +99,9 @@ COPY --from=builder /usr/local/bin/afl-qemu-trace-mips /usr/local/bin/
 COPY --from=builder /usr/local/bin/afl-qemu-trace-mipsel /usr/local/bin/
 COPY --from=builder /usr/local/bin/afl-qemu-trace-aarch64 /usr/local/bin/
 COPY --from=builder /usr/local/bin/afl-qemu-trace-i386 /usr/local/bin/
+
+# Copy cross-compiled desock libraries
+COPY --from=builder /opt/desock/ /opt/desock/
 
 # Create working directories
 RUN mkdir -p /data/firmware /opt/fuzzing /opt/dictionaries

@@ -174,7 +174,7 @@ The server uses a mutable `ProjectState` dataclass so all project context (proje
 | Security | `tools/security.py` | `check_known_cves`, `analyze_config_security`, `check_setuid_binaries`, `analyze_init_scripts`, `check_filesystem_permissions`, `analyze_certificate` |
 | SBOM | `tools/sbom.py` | `generate_sbom`, `get_sbom_components`, `check_component_cves`, `run_vulnerability_scan` |
 | Emulation | `tools/emulation.py` | `start_emulation`, `run_command_in_emulation`, `stop_emulation`, `check_emulation_status`, `get_emulation_logs`, `enumerate_emulation_services`, `diagnose_emulation_environment`, `troubleshoot_emulation`, `get_crash_dump`, `run_gdb_command`, `save_emulation_preset`, `list_emulation_presets`, `start_emulation_from_preset` |
-| Fuzzing | `tools/fuzzing.py` | `analyze_fuzzing_target`, `generate_fuzzing_dictionary`, `generate_seed_corpus`, `generate_fuzzing_harness`, `start_fuzzing_campaign`, `check_fuzzing_status`, `stop_fuzzing_campaign`, `triage_fuzzing_crash` |
+| Fuzzing | `tools/fuzzing.py` | `analyze_fuzzing_target`, `generate_fuzzing_dictionary`, `generate_seed_corpus`, `generate_fuzzing_harness`, `start_fuzzing_campaign`, `check_fuzzing_status`, `stop_fuzzing_campaign`, `triage_fuzzing_crash`, `diagnose_fuzzing_campaign` |
 | Comparison | `tools/comparison.py` | `list_firmware_versions`, `diff_firmware`, `diff_binary`, `diff_decompilation` |
 | UART | `tools/uart.py` | `uart_connect`, `uart_send_command`, `uart_read`, `uart_send_break`, `uart_send_raw`, `uart_disconnect`, `uart_status`, `uart_get_transcript` |
 | Reporting | `tools/reporting.py` | `add_finding`, `list_findings`, `update_finding`, `read_project_instructions`, `list_project_documents`, `read_project_document` |

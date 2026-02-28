@@ -68,6 +68,14 @@ NETWORK_FUNCTIONS = {
     "select", "poll", "epoll_wait",
 }
 
+# Architecture → desock shared library path inside the fuzzing container
+DESOCK_LIB_MAP: dict[str, str] = {
+    "arm": "/opt/desock/desock_arm.so",
+    "aarch64": "/opt/desock/desock_aarch64.so",
+    "mips": "/opt/desock/desock_mips.so",
+    "mipsel": "/opt/desock/desock_mipsel.so",
+}
+
 
 class FuzzingService:
     """Manages AFL++ fuzzing campaign lifecycle via Docker containers."""
@@ -452,6 +460,18 @@ class FuzzingService:
                 f"AFL_SKIP_CPUFREQ=1 "
                 f"QEMU_LD_PREFIX=/firmware "
             )
+
+            # Inject desock library via AFL_PRELOAD to redirect socket
+            # I/O to stdin/stdout for network daemon fuzzing
+            desock = config.get("desock", False)
+            if desock:
+                desock_lib = DESOCK_LIB_MAP.get(arch)
+                if desock_lib:
+                    afl_cmd += f"AFL_PRELOAD={desock_lib} "
+                else:
+                    logger.warning(
+                        "Desock requested but no library for arch %s", arch
+                    )
 
             if env_prefix:
                 afl_cmd += f"{env_prefix} "

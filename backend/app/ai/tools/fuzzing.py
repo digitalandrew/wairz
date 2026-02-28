@@ -147,6 +147,17 @@ def register_fuzzing_tools(registry: ToolRegistry) -> None:
                         "that need environment variable setup before execution."
                     ),
                 },
+                "desock": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable desocketing for network daemon binaries. When true, "
+                        "intercepts socket/bind/listen/accept calls and redirects "
+                        "network I/O to stdin/stdout, allowing AFL++ to fuzz daemon "
+                        "binaries that normally read from network connections. Use "
+                        "this for binaries identified as 'network' strategy by "
+                        "analyze_fuzzing_target."
+                    ),
+                },
             },
             "required": ["binary_path"],
         },
@@ -252,6 +263,29 @@ def register_fuzzing_tools(registry: ToolRegistry) -> None:
             "required": ["campaign_id", "crash_id"],
         },
         handler=_handle_triage_crash,
+    )
+
+    registry.register(
+        name="diagnose_fuzzing_campaign",
+        description=(
+            "Diagnose a fuzzing campaign that may not be performing well. "
+            "Checks campaign status, reads AFL++ logs for startup errors, "
+            "analyzes coverage for stalls, and provides actionable recommendations "
+            "(e.g., enable desock for network daemons, increase timeout for hangs). "
+            "Use this when coverage is flat, execs/sec is zero, or the campaign "
+            "seems stuck."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "campaign_id": {
+                    "type": "string",
+                    "description": "The campaign ID to diagnose",
+                },
+            },
+            "required": ["campaign_id"],
+        },
+        handler=_handle_diagnose_campaign,
     )
 
 
@@ -555,32 +589,29 @@ async def _handle_generate_harness(input: dict, context: ToolContext) -> str:
                 "harness_script": harness,
             }
         else:
-            lines.append("Strategy: NETWORK fuzzing (daemon-style — limited support)")
+            lines.append("Strategy: NETWORK fuzzing (daemon-style with desock)")
             lines.append("")
             lines.append(
-                "This binary appears to be a network daemon (uses socket/bind/listen/accept). "
-                "Direct daemon fuzzing is NOT supported in QEMU user mode because the "
-                "binary forks and listens on a socket rather than reading from stdin."
+                "This binary is a network daemon (uses socket/bind/listen/accept). "
+                "The desock library will intercept socket calls and redirect network "
+                "I/O to stdin/stdout, allowing AFL++ to fuzz the network parsing "
+                "code directly."
             )
             lines.append("")
-            lines.append("Alternative approaches:")
-            lines.append("  1. **Stdin redirection**: If the binary has a CLI/debug mode that ")
-            lines.append("     reads from stdin, use stdin strategy instead.")
-            lines.append("  2. **LD_PRELOAD desocketing**: Use a preload library (e.g., ")
-            lines.append("     preeny's desock.so) to redirect socket I/O to stdin/stdout. ")
-            lines.append("     Set environment: {\"LD_PRELOAD\": \"/path/to/desock.so\"}")
-            lines.append("  3. **CGI handler fuzzing**: If the daemon delegates to CGI handlers, ")
-            lines.append("     fuzz those handlers directly with the CGI harness approach.")
-            lines.append("  4. **Function-level fuzzing**: Write a custom harness that calls ")
-            lines.append("     specific parsing functions from the binary's shared libraries.")
-            lines.append("")
-            lines.append("If you want to attempt stdin redirection anyway:")
+            lines.append("Recommended start_fuzzing_campaign parameters:")
             lines.append(f'  binary_path: "{binary_path}"')
-            lines.append("  (AFL++ will pipe fuzz input to stdin — may not reach network code)")
+            lines.append("  desock: true")
+            lines.append("  (AFL++ will pipe fuzz data through the desocketed accept() connection)")
+            lines.append("")
+            lines.append("Notes:")
+            lines.append("- The daemon's accept() loop will receive one connection with AFL++ fuzz data")
+            lines.append("- Some daemons may need arguments to skip daemonization (e.g., -f for foreground)")
+            lines.append("- If coverage is flat, the daemon may fork after accept() — try adding")
+            lines.append('  environment: {"AFL_NO_FORKSRV": "1"}')
 
             campaign_params = {
                 "binary_path": binary_path,
-                "_note": "Daemon-style binary — stdin fuzzing may have limited coverage",
+                "desock": True,
             }
 
     lines.append("")
@@ -688,6 +719,8 @@ async def _handle_start_campaign(input: dict, context: ToolContext) -> str:
         config["environment"] = input["environment"]
     if "harness_script" in input:
         config["harness_script"] = input["harness_script"]
+    if "desock" in input:
+        config["desock"] = input["desock"]
 
     svc = FuzzingService(context.db)
     try:
@@ -837,5 +870,213 @@ async def _handle_triage_crash(input: dict, context: ToolContext) -> str:
             "\nThis crash appears exploitable. Consider creating a finding "
             "with add_finding (source='fuzzing') to formally record it."
         )
+
+    return "\n".join(lines)
+
+
+async def _handle_diagnose_campaign(input: dict, context: ToolContext) -> str:
+    """Diagnose a fuzzing campaign for performance issues."""
+    campaign_id = input.get("campaign_id")
+    if not campaign_id:
+        return "Error: campaign_id is required."
+
+    from uuid import UUID
+    import docker
+    import docker.errors
+
+    svc = FuzzingService(context.db)
+    try:
+        campaign = await svc.get_campaign_status(UUID(campaign_id), context.project_id)
+    except ValueError as exc:
+        return f"Error: {exc}"
+
+    config = campaign.config or {}
+    stats = campaign.stats or {}
+    lines: list[str] = [
+        f"Fuzzing Campaign Diagnostics: {campaign.id}",
+        f"  Binary: {campaign.binary_path}",
+        f"  Status: {campaign.status}",
+        f"  Desock: {'enabled' if config.get('desock') else 'disabled'}",
+        "",
+    ]
+
+    issues: list[str] = []
+    recommendations: list[str] = []
+
+    # --- Check 1: Campaign status ---
+    if campaign.status == "error":
+        lines.append(f"  ERROR: {campaign.error_message or 'unknown error'}")
+        issues.append("Campaign is in error state")
+        recommendations.append(
+            "Check the error message above. The campaign may need to be "
+            "recreated with different parameters."
+        )
+
+    if campaign.status in ("stopped", "completed"):
+        lines.append("  Campaign is not running.")
+        issues.append("Campaign is stopped — no live data available")
+
+    # --- Check 2: AFL++ log from container ---
+    afl_log = ""
+    afl_process_running = False
+    if campaign.container_id and campaign.status == "running":
+        try:
+            client = docker.from_env()
+            container = client.containers.get(campaign.container_id)
+
+            # Read AFL++ log
+            log_result = container.exec_run(
+                ["tail", "-100", "/opt/fuzzing/afl.log"]
+            )
+            if log_result.exit_code == 0:
+                afl_log = log_result.output.decode("utf-8", errors="replace")
+
+            # Check if AFL++ process is running
+            ps_result = container.exec_run(["sh", "-c", "pgrep -f afl-fuzz"])
+            afl_process_running = ps_result.exit_code == 0
+
+            # Check if QEMU trace process is running
+            qemu_result = container.exec_run(
+                ["sh", "-c", "pgrep -f afl-qemu-trace"]
+            )
+            qemu_running = qemu_result.exit_code == 0
+
+            lines.append("  Container: running")
+            lines.append(
+                f"  AFL++ process: {'running' if afl_process_running else 'NOT running'}"
+            )
+            lines.append(
+                f"  QEMU trace: {'running' if qemu_running else 'NOT running'}"
+            )
+
+            if not afl_process_running:
+                issues.append("AFL++ process is not running in the container")
+                recommendations.append(
+                    "AFL++ crashed or failed to start. Check the log output below "
+                    "for details. You may need to stop and restart with different settings."
+                )
+
+        except docker.errors.NotFound:
+            lines.append("  Container: NOT FOUND (may have been removed)")
+            issues.append("Container no longer exists")
+        except Exception as exc:
+            lines.append(f"  Container check failed: {exc}")
+
+    # --- Check 3: Coverage analysis ---
+    total_execs = stats.get("total_execs", 0)
+    execs_per_sec = stats.get("execs_per_sec", 0)
+    bitmap_cvg = stats.get("bitmap_cvg", "N/A")
+    saved_crashes = stats.get("saved_crashes", 0)
+    saved_hangs = stats.get("saved_hangs", 0)
+    corpus_count = stats.get("corpus_count", 0)
+
+    if stats:
+        lines.append("")
+        lines.append("  Live statistics:")
+        lines.append(f"    Execs/sec: {execs_per_sec}")
+        lines.append(f"    Total execs: {total_execs}")
+        lines.append(f"    Coverage: {bitmap_cvg}")
+        lines.append(f"    Corpus: {corpus_count}")
+        lines.append(f"    Crashes: {saved_crashes}")
+        lines.append(f"    Hangs: {saved_hangs}")
+
+    # Zero executions
+    if campaign.status == "running" and total_execs == 0:
+        issues.append("Zero executions — AFL++ may have failed to start")
+        recommendations.append(
+            "AFL++ produced no executions. Check the log below for startup errors. "
+            "Common causes: binary not found, missing shared libraries (check "
+            "QEMU_LD_PREFIX), or architecture mismatch."
+        )
+
+    # Flat coverage detection (100 execs is enough to detect a problem)
+    if total_execs > 100:
+        cvg_str = str(bitmap_cvg).replace("%", "").strip()
+        try:
+            cvg_pct = float(cvg_str)
+            if cvg_pct < 5.0:
+                issues.append(
+                    f"Very low coverage ({bitmap_cvg}) after {total_execs} executions"
+                )
+                if not config.get("desock"):
+                    # Check if this might be a network binary
+                    fw_result = await context.db.execute(
+                        select(Firmware).where(Firmware.id == campaign.firmware_id)
+                    )
+                    firmware = fw_result.scalar_one_or_none()
+                    if firmware:
+                        try:
+                            analysis = await svc.analyze_target(
+                                firmware, campaign.binary_path
+                            )
+                            if analysis.get("recommended_strategy") == "network":
+                                recommendations.append(
+                                    "This binary is a NETWORK DAEMON but desock is disabled. "
+                                    "AFL++ fuzz data never reaches the network parsing code. "
+                                    "ACTION: Stop this campaign and restart with desock: true"
+                                )
+                        except Exception:
+                            pass
+                    if not recommendations:
+                        recommendations.append(
+                            "Coverage is very low. The binary may not be processing "
+                            "AFL++ input effectively. Consider enabling desock (if it's "
+                            "a network daemon) or using a harness script."
+                        )
+                else:
+                    recommendations.append(
+                        "Coverage is very low even with desock. The daemon may fork "
+                        "after accept() — try environment: {\"AFL_NO_FORKSRV\": \"1\"}. "
+                        "Or the binary may exit before reading stdin."
+                    )
+        except (ValueError, TypeError):
+            pass
+
+    # High hang count
+    if saved_hangs > 10 and saved_hangs > saved_crashes:
+        issues.append(f"High hang count ({saved_hangs}) — binary may be timing out")
+        recommendations.append(
+            f"Many hangs detected. Current timeout: "
+            f"{config.get('timeout_per_exec', 1000)}ms. "
+            "Try increasing timeout_per_exec (e.g., 5000 or 10000)."
+        )
+
+    # --- Check 4: AFL++ log output ---
+    if afl_log:
+        # Look for known error patterns
+        if "PROGRAM ABORT" in afl_log:
+            issues.append("AFL++ aborted — see log for details")
+        if "No instrumentation detected" in afl_log:
+            issues.append("No instrumentation — QEMU mode may not be working")
+            recommendations.append(
+                "AFL++ reports no instrumentation. Ensure the binary architecture "
+                "matches the QEMU trace binary."
+            )
+        if "can't find" in afl_log.lower() or "not found" in afl_log.lower():
+            issues.append("Binary or dependency not found")
+            recommendations.append(
+                "A file was not found. Check that binary_path is correct and "
+                "all shared libraries exist under the firmware root."
+            )
+
+        lines.append("")
+        lines.append("  AFL++ log (last lines):")
+        for log_line in afl_log.strip().split("\n")[-30:]:
+            lines.append(f"    {log_line}")
+
+    # --- Summary ---
+    lines.append("")
+    if issues:
+        lines.append("ISSUES FOUND:")
+        for i, issue in enumerate(issues, 1):
+            lines.append(f"  {i}. {issue}")
+    else:
+        lines.append("No issues detected — campaign appears healthy.")
+
+    if recommendations:
+        lines.append("")
+        lines.append("RECOMMENDATIONS:")
+        for i, rec in enumerate(recommendations, 1):
+            lines.append(f"  {i}. {rec}")
 
     return "\n".join(lines)
