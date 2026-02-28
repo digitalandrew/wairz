@@ -17,7 +17,9 @@ from app.schemas.sbom import (
     SbomGenerateResponse,
     SbomSummaryResponse,
     SbomVulnerabilityResponse,
+    VulnerabilityResolutionStatus,
     VulnerabilityScanResponse,
+    VulnerabilityUpdateRequest,
 )
 from app.services.firmware_service import FirmwareService
 from app.services.sbom_service import SbomService
@@ -289,6 +291,9 @@ async def list_vulnerabilities(
         None, description="Filter by component ID"
     ),
     cve_id: str | None = Query(None, description="Filter by CVE ID"),
+    resolution_status: str | None = Query(
+        None, description="Filter by resolution status (open, resolved, ignored, false_positive)"
+    ),
     firmware=Depends(_resolve_firmware),
     db: AsyncSession = Depends(get_db),
 ):
@@ -309,6 +314,10 @@ async def list_vulnerabilities(
         stmt = stmt.where(SbomVulnerability.component_id == component_id)
     if cve_id:
         stmt = stmt.where(SbomVulnerability.cve_id == cve_id)
+    if resolution_status:
+        stmt = stmt.where(
+            SbomVulnerability.resolution_status == resolution_status
+        )
 
     result = await db.execute(stmt)
     rows = result.all()
@@ -321,6 +330,59 @@ async def list_vulnerabilities(
         responses.append(resp)
 
     return responses
+
+
+@router.patch(
+    "/vulnerabilities/{vulnerability_id}",
+    response_model=SbomVulnerabilityResponse,
+)
+async def update_vulnerability(
+    vulnerability_id: uuid.UUID,
+    body: VulnerabilityUpdateRequest,
+    firmware=Depends(_resolve_firmware),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update vulnerability resolution status (ignore, false positive, reopen)."""
+    stmt = select(SbomVulnerability).where(
+        SbomVulnerability.id == vulnerability_id,
+        SbomVulnerability.firmware_id == firmware.id,
+    )
+    result = await db.execute(stmt)
+    vuln = result.scalars().first()
+    if not vuln:
+        raise HTTPException(404, "Vulnerability not found")
+
+    if body.resolution_status is not None:
+        new_status = body.resolution_status.value
+        vuln.resolution_status = new_status
+
+        if new_status in ("resolved", "ignored", "false_positive"):
+            vuln.resolved_by = "user"
+            vuln.resolved_at = datetime.utcnow()
+        elif new_status == "open":
+            # Reopening — clear resolution metadata
+            vuln.resolved_by = None
+            vuln.resolved_at = None
+
+    if body.resolution_justification is not None:
+        vuln.resolution_justification = body.resolution_justification
+
+    await db.commit()
+    await db.refresh(vuln)
+
+    # Build response with component info
+    comp_stmt = select(SbomComponent.name, SbomComponent.version).where(
+        SbomComponent.id == vuln.component_id
+    )
+    comp_result = await db.execute(comp_stmt)
+    comp_row = comp_result.first()
+
+    resp = SbomVulnerabilityResponse.model_validate(vuln)
+    if comp_row:
+        resp.component_name = comp_row[0]
+        resp.component_version = comp_row[1]
+
+    return resp
 
 
 @router.get("/vulnerabilities/summary", response_model=SbomSummaryResponse)

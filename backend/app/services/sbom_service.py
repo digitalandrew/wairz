@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 
 from elftools.elf.elffile import ELFFile
 
-from app.utils.sandbox import validate_path
+from app.utils.sandbox import safe_walk, validate_path
 
-MAX_BINARIES_SCAN = 100
-MAX_BINARY_READ = 64 * 1024  # 64KB for strings extraction
+MAX_BINARIES_SCAN = 200
+MAX_BINARY_READ = 256 * 1024  # 256KB for strings extraction
+MAX_LIBC_READ = 512 * 1024  # 512KB — C library binaries are large
 
 # Well-known vendor:product mappings for CPE construction
 CPE_VENDOR_MAP: dict[str, tuple[str, str]] = {
@@ -98,6 +99,14 @@ CPE_VENDOR_MAP: dict[str, tuple[str, str]] = {
     "ubus": ("openwrt", "ubus"),
     "libubox": ("openwrt", "libubox"),
     "uci": ("openwrt", "uci"),
+    # Compiler / toolchain
+    "gcc": ("gnu", "gcc"),
+    "uclibc-ng": ("uclibc", "uclibc"),
+    # Network tools
+    "net-snmp": ("net-snmp", "net-snmp"),
+    "iproute2": ("iproute2_project", "iproute2"),
+    "pppd": ("samba", "ppp"),
+    "libnl": ("infradead", "libnl"),
     # Logging
     "syslog-ng": ("balabit", "syslog-ng"),
     # IoT protocols
@@ -128,6 +137,31 @@ VERSION_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("mini_httpd", re.compile(rb"mini_httpd/(\d+\.\d+(?:\.\d+)?)")),
     ("lua", re.compile(rb"Lua (\d+\.\d+\.\d+)")),
     ("sqlite", re.compile(rb"SQLite (\d+\.\d+\.\d+)")),
+    # C library
+    ("glibc", re.compile(rb"GNU C Library[^\n]*version (\d+\.\d+(?:\.\d+)?)")),
+    ("glibc", re.compile(rb"stable release version (\d+\.\d+(?:\.\d+)?)")),
+    ("uclibc-ng", re.compile(rb"uClibc(?:-ng)? (\d+\.\d+\.\d+)")),
+    ("musl", re.compile(rb"musl libc (\d+\.\d+\.\d+)")),
+    # GCC / toolchain
+    ("gcc", re.compile(rb"GCC: \([^)]*\) (\d+\.\d+\.\d+)")),
+    # Bootloader
+    ("u-boot", re.compile(rb"U-Boot (\d{4}\.\d{2}(?:-\S+)?)")),
+    ("u-boot", re.compile(rb"U-Boot SPL (\d{4}\.\d{2}(?:-\S+)?)")),
+    # Network tools
+    ("iptables", re.compile(rb"iptables v(\d+\.\d+\.\d+)")),
+    ("iproute2", re.compile(rb"iproute2[/-](\d+\.\d+(?:\.\d+)?)")),
+    ("pppd", re.compile(rb"pppd (\d+\.\d+\.\d+)")),
+    ("net-snmp", re.compile(rb"NET-SNMP (\d+\.\d+\.\d+)")),
+    ("syslog-ng", re.compile(rb"syslog-ng (\d+\.\d+\.\d+)")),
+    # Libraries (content-based extraction)
+    ("zlib", re.compile(rb"(?:zlib |inflate )(\d+\.\d+\.\d+(?:\.\d+)?)")),
+    ("libpng", re.compile(rb"libpng[- ](\d+\.\d+\.\d+)")),
+    ("libxml2", re.compile(rb"libxml2[- ](\d+\.\d+\.\d+)")),
+    ("pcre", re.compile(rb"PCRE (\d+\.\d+(?:\.\d+)?)")),
+    ("expat", re.compile(rb"expat_(\d+\.\d+\.\d+)")),
+    ("libjpeg", re.compile(rb"(?:libjpeg|JPEG[- ]library)[- ](\d+[a-z]?(?:\.\d+)*)")),
+    ("json-c", re.compile(rb"json-c[/ ](\d+\.\d+(?:\.\d+)?)")),
+    ("dbus", re.compile(rb"D-Bus (\d+\.\d+\.\d+)")),
     # Additional patterns
     ("apache", re.compile(rb"Apache/(\d+\.\d+\.\d+)")),
     ("uhttpd", re.compile(rb"uhttpd[/ ]v?(\d+\.\d+(?:\.\d+)?)")),
@@ -280,6 +314,8 @@ class SbomService:
         self._scan_kernel_version()
         self._scan_firmware_markers()
         self._scan_busybox()
+        self._scan_c_library()
+        self._scan_gcc_version()
         self._scan_library_sonames()
         self._scan_binary_version_strings()
         self._annotate_service_risks()
@@ -662,11 +698,230 @@ class SbomService:
                 return  # Found it, no need to check more candidates
 
     # ------------------------------------------------------------------
+    # Dedicated C library detection
+    # ------------------------------------------------------------------
+
+    def _scan_c_library(self) -> None:
+        """Detect the C library (glibc, uClibc-ng, musl) and its version.
+
+        Firmware has exactly one C library; we return after the first
+        identification.  Reads up to MAX_LIBC_READ because libc binaries
+        are large and the version string may be far into the file.
+        """
+        # Static candidate paths
+        candidates: list[str] = [
+            "/lib/libc.so.6",
+            "/lib/libc.so.0",
+        ]
+
+        # Dynamic candidates from /lib directory listing
+        lib_abs = self._abs_path("/lib")
+        if os.path.isdir(lib_abs):
+            try:
+                for entry in os.listdir(lib_abs):
+                    if entry.startswith(("ld-linux", "ld-musl-", "ld-uClibc")):
+                        candidates.append(f"/lib/{entry}")
+                    elif entry.startswith("libc.so."):
+                        path = f"/lib/{entry}"
+                        if path not in candidates:
+                            candidates.append(path)
+            except OSError:
+                pass
+
+        checked_realpaths: set[str] = set()
+
+        for candidate in candidates:
+            abs_path = self._abs_path(candidate)
+            try:
+                real_path = os.path.realpath(abs_path)
+            except OSError:
+                continue
+            if not real_path.startswith(self.extracted_root):
+                continue
+            if not os.path.isfile(real_path):
+                continue
+            if real_path in checked_realpaths:
+                continue
+            checked_realpaths.add(real_path)
+
+            try:
+                with open(real_path, "rb") as f:
+                    if f.read(4) != b"\x7fELF":
+                        continue
+                    f.seek(0)
+                    data = f.read(MAX_LIBC_READ)
+            except OSError:
+                continue
+
+            rel_path = "/" + os.path.relpath(real_path, self.extracted_root)
+
+            # --- glibc detection ---
+            # String match: "GNU C Library ... version 2.31"
+            m = re.search(rb"GNU C Library[^\n]*version (\d+\.\d+(?:\.\d+)?)", data)
+            if not m:
+                m = re.search(rb"stable release version (\d+\.\d+(?:\.\d+)?)", data)
+            if m:
+                version = m.group(1).decode("ascii", errors="replace")
+                self._add_component(IdentifiedComponent(
+                    name="glibc",
+                    version=version,
+                    type="library",
+                    cpe=self._build_cpe("gnu", "glibc", version),
+                    purl=self._build_purl("glibc", version),
+                    supplier="gnu",
+                    detection_source="binary_strings",
+                    detection_confidence="high",
+                    file_paths=[rel_path],
+                    metadata={"detection_note": "dedicated C library scan"},
+                ))
+                return
+
+            # Fallback: pick highest GLIBC_X.Y symbol version
+            glibc_versions = re.findall(rb"GLIBC_(\d+\.\d+(?:\.\d+)?)", data)
+            if glibc_versions:
+                parsed = []
+                for v in set(glibc_versions):
+                    try:
+                        parts = tuple(int(x) for x in v.decode("ascii").split("."))
+                        parsed.append((parts, v.decode("ascii")))
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                if parsed:
+                    parsed.sort(key=lambda x: x[0], reverse=True)
+                    version = parsed[0][1]
+                    self._add_component(IdentifiedComponent(
+                        name="glibc",
+                        version=version,
+                        type="library",
+                        cpe=self._build_cpe("gnu", "glibc", version),
+                        purl=self._build_purl("glibc", version),
+                        supplier="gnu",
+                        detection_source="binary_strings",
+                        detection_confidence="medium",
+                        file_paths=[rel_path],
+                        metadata={
+                            "detection_note": "inferred from GLIBC symbol versions",
+                        },
+                    ))
+                    return
+
+            # --- uClibc-ng detection ---
+            m = re.search(rb"uClibc(?:-ng)? (\d+\.\d+\.\d+)", data)
+            if m:
+                version = m.group(1).decode("ascii", errors="replace")
+                self._add_component(IdentifiedComponent(
+                    name="uclibc-ng",
+                    version=version,
+                    type="library",
+                    cpe=self._build_cpe("uclibc", "uclibc", version),
+                    purl=self._build_purl("uclibc-ng", version),
+                    supplier="uclibc",
+                    detection_source="binary_strings",
+                    detection_confidence="high",
+                    file_paths=[rel_path],
+                    metadata={"detection_note": "dedicated C library scan"},
+                ))
+                return
+
+            # --- musl detection ---
+            m = re.search(rb"musl libc (\d+\.\d+\.\d+)", data)
+            if m:
+                version = m.group(1).decode("ascii", errors="replace")
+                self._add_component(IdentifiedComponent(
+                    name="musl",
+                    version=version,
+                    type="library",
+                    cpe=self._build_cpe("musl-libc", "musl", version),
+                    purl=self._build_purl("musl", version),
+                    supplier="musl-libc",
+                    detection_source="binary_strings",
+                    detection_confidence="high",
+                    file_paths=[rel_path],
+                    metadata={"detection_note": "dedicated C library scan"},
+                ))
+                return
+
+    # ------------------------------------------------------------------
+    # Dedicated GCC version detection
+    # ------------------------------------------------------------------
+
+    def _scan_gcc_version(self) -> None:
+        """Detect the GCC version used to compile the firmware.
+
+        Probes a few common binaries for the ``GCC: (toolchain) X.Y.Z``
+        string embedded by the compiler.  Returns after first match
+        because the GCC version is consistent across a build.
+        """
+        probe_paths = [
+            "/bin/busybox",
+            "/sbin/init",
+            "/lib/libc.so.6",
+            "/lib/libc.so.0",
+            "/usr/sbin/httpd",
+            "/usr/bin/curl",
+        ]
+
+        checked_realpaths: set[str] = set()
+
+        for probe in probe_paths:
+            abs_path = self._abs_path(probe)
+            try:
+                real_path = os.path.realpath(abs_path)
+            except OSError:
+                continue
+            if not real_path.startswith(self.extracted_root):
+                continue
+            if not os.path.isfile(real_path):
+                continue
+            if real_path in checked_realpaths:
+                continue
+            checked_realpaths.add(real_path)
+
+            try:
+                with open(real_path, "rb") as f:
+                    if f.read(4) != b"\x7fELF":
+                        continue
+                    f.seek(0)
+                    data = f.read(MAX_BINARY_READ)
+            except OSError:
+                continue
+
+            m = re.search(rb"GCC: \(([^)]*)\) (\d+\.\d+\.\d+)", data)
+            if m:
+                toolchain = m.group(1).decode("ascii", errors="replace")
+                version = m.group(2).decode("ascii", errors="replace")
+                rel_path = "/" + os.path.relpath(real_path, self.extracted_root)
+
+                metadata: dict = {"detection_note": "dedicated GCC scan"}
+                if toolchain:
+                    metadata["toolchain"] = toolchain
+
+                self._add_component(IdentifiedComponent(
+                    name="gcc",
+                    version=version,
+                    type="application",
+                    cpe=self._build_cpe("gnu", "gcc", version),
+                    purl=self._build_purl("gcc", version),
+                    supplier="gnu",
+                    detection_source="binary_strings",
+                    detection_confidence="high",
+                    file_paths=[rel_path],
+                    metadata=metadata,
+                ))
+                return
+
+    # ------------------------------------------------------------------
     # Strategy 3: Library SONAME parsing
     # ------------------------------------------------------------------
 
     def _scan_library_sonames(self) -> None:
-        """Scan shared library files for version information."""
+        """Scan shared library files for version information.
+
+        Uses safe_walk() for recursive scanning so libraries in
+        subdirectories (e.g. /lib/ipsec/, /usr/lib/lua/) are found.
+        When a library has a useless version (single digit like "6"),
+        falls back to reading binary content for a real version string.
+        """
         lib_dirs = [
             "/lib", "/usr/lib", "/lib64", "/usr/lib64",
         ]
@@ -676,42 +931,100 @@ class SbomService:
             abs_dir = self._abs_path(lib_dir)
             if not os.path.isdir(abs_dir):
                 continue
-            try:
-                entries = os.listdir(abs_dir)
-            except OSError:
-                continue
 
-            for entry in entries:
-                if ".so" not in entry:
-                    continue
-                abs_path = os.path.join(abs_dir, entry)
-                if not os.path.isfile(abs_path):
-                    continue
-                # Skip symlinks to avoid double-counting
-                if os.path.islink(abs_path):
+            for dirpath, _dirs, files in safe_walk(abs_dir):
+                # Stay inside the extracted root
+                if not dirpath.startswith(self.extracted_root):
                     continue
 
-                lib_info = self._parse_library_file(abs_path, f"{lib_dir}/{entry}")
-                if lib_info and lib_info["name"] not in seen_libs:
-                    seen_libs.add(lib_info["name"])
-                    vendor_product = CPE_VENDOR_MAP.get(lib_info["name"].lower())
+                for entry in files:
+                    if ".so" not in entry:
+                        continue
+                    abs_path = os.path.join(dirpath, entry)
+                    if not os.path.isfile(abs_path):
+                        continue
+                    # Skip symlinks to avoid double-counting
+                    if os.path.islink(abs_path):
+                        continue
+
+                    dir_rel = "/" + os.path.relpath(dirpath, self.extracted_root)
+                    file_rel = f"{dir_rel}/{entry}"
+
+                    lib_info = self._parse_library_file(abs_path, file_rel)
+                    if not lib_info or lib_info["name"] in seen_libs:
+                        continue
+
+                    version = lib_info["version"]
+                    component_name = lib_info["name"]
+
+                    # If the version is useless, try to extract from binary content.
+                    # If content extraction also fails, skip — a dedicated scanner
+                    # or the binary string scanner will find the real version.
+                    if self._is_useless_version(version):
+                        content_version = self._extract_version_from_library_content(
+                            abs_path, component_name
+                        )
+                        if content_version:
+                            version = content_version
+                        else:
+                            continue
+
+                    seen_libs.add(component_name)
+                    vendor_product = CPE_VENDOR_MAP.get(component_name.lower())
                     cpe = None
                     if vendor_product:
-                        cpe = self._build_cpe(vendor_product[0], vendor_product[1], lib_info["version"])
+                        cpe = self._build_cpe(vendor_product[0], vendor_product[1], version)
 
                     comp = IdentifiedComponent(
-                        name=lib_info["name"],
-                        version=lib_info["version"],
+                        name=component_name,
+                        version=version,
                         type="library",
                         cpe=cpe,
-                        purl=self._build_purl(lib_info["name"], lib_info["version"]),
+                        purl=self._build_purl(component_name, version),
                         supplier=vendor_product[0] if vendor_product else None,
                         detection_source="library_soname",
                         detection_confidence="high",
-                        file_paths=[f"{lib_dir}/{entry}"],
+                        file_paths=[file_rel],
                         metadata={"soname": lib_info.get("soname", "")},
                     )
                     self._add_component(comp)
+
+    @staticmethod
+    def _is_useless_version(version: str | None) -> bool:
+        """Return True if the version is missing or unlikely to be a real
+        software version.
+
+        SONAME versions like "6" (libc.so.6), "0" (libc.so.0), or "200"
+        (libnl-3.so.200) are just ABI version numbers, not real
+        upstream software versions.  Real versions have at least one dot
+        (e.g. "1.2", "2.31", "1.0.2k").
+        """
+        if not version:
+            return True
+        # A bare integer (no dots) is almost always a SONAME ABI version
+        return bool(re.fullmatch(r"\d+", version))
+
+    def _extract_version_from_library_content(
+        self, abs_path: str, component_name: str
+    ) -> str | None:
+        """Read a library binary and match VERSION_PATTERNS for its component.
+
+        Returns the extracted version string, or None.
+        """
+        try:
+            with open(abs_path, "rb") as f:
+                data = f.read(MAX_BINARY_READ)
+        except OSError:
+            return None
+
+        name_lower = component_name.lower()
+        for pattern_name, pattern in VERSION_PATTERNS:
+            if pattern_name.lower() != name_lower:
+                continue
+            m = pattern.search(data)
+            if m:
+                return m.group(1).decode("ascii", errors="replace")
+        return None
 
     def _parse_library_file(self, abs_path: str, rel_path: str) -> dict | None:
         """Extract component name and version from a shared library file."""

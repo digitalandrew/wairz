@@ -1,11 +1,12 @@
 """SBOM & vulnerability AI tools for firmware analysis.
 
 Tools for generating Software Bill of Materials, listing identified
-components, checking individual components for CVEs, and running
-full vulnerability scans.
+components, checking individual components for CVEs, running
+full vulnerability scans, and batch-assessing vulnerability relevance.
 """
 
 import asyncio
+from datetime import datetime
 
 from sqlalchemy import func, select
 
@@ -108,6 +109,107 @@ def register_sbom_tools(registry: ToolRegistry) -> None:
             },
         },
         handler=_handle_run_vulnerability_scan,
+    )
+
+    registry.register(
+        name="list_vulnerabilities_for_assessment",
+        description=(
+            "List vulnerability scan results for triage/assessment. Returns "
+            "unassessed (open, no adjusted_severity) vulnerabilities by "
+            "default, in batches of up to 50. Use this to review CVEs before "
+            "using assess_vulnerabilities to batch-adjust severity or resolve "
+            "them based on device context."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "status_filter": {
+                    "type": "string",
+                    "enum": ["open", "resolved", "ignored", "false_positive"],
+                    "description": "Filter by resolution status (default: open)",
+                },
+                "severity_filter": {
+                    "type": "string",
+                    "enum": ["critical", "high", "medium", "low"],
+                    "description": "Filter by NVD severity",
+                },
+                "unassessed_only": {
+                    "type": "boolean",
+                    "description": "Only show vulns without adjusted_severity (default: true)",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Pagination offset (default: 0)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results per call (default: 50, max: 50)",
+                },
+            },
+        },
+        handler=_handle_list_vulnerabilities_for_assessment,
+    )
+
+    registry.register(
+        name="assess_vulnerabilities",
+        description=(
+            "Batch-assess vulnerabilities: adjust severity, set resolution "
+            "status, and provide rationale. Use after reviewing CVEs with "
+            "list_vulnerabilities_for_assessment. Max 50 per call. "
+            "Each assessment requires a rationale explaining the decision. "
+            "Sets resolved_by='ai' when resolving/ignoring."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "assessments": {
+                    "type": "array",
+                    "maxItems": 50,
+                    "description": "Array of assessment objects",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "vulnerability_id": {
+                                "type": "string",
+                                "description": "UUID of the vulnerability",
+                            },
+                            "adjusted_severity": {
+                                "type": "string",
+                                "enum": [
+                                    "critical",
+                                    "high",
+                                    "medium",
+                                    "low",
+                                    "info",
+                                ],
+                                "description": "Context-adjusted severity (optional)",
+                            },
+                            "adjusted_cvss_score": {
+                                "type": "number",
+                                "description": "Context-adjusted CVSS score 0.0-10.0 (optional)",
+                            },
+                            "resolution_status": {
+                                "type": "string",
+                                "enum": [
+                                    "open",
+                                    "resolved",
+                                    "ignored",
+                                    "false_positive",
+                                ],
+                                "description": "Resolution status (optional)",
+                            },
+                            "rationale": {
+                                "type": "string",
+                                "description": "Explanation for the assessment decision (required)",
+                            },
+                        },
+                        "required": ["vulnerability_id", "rationale"],
+                    },
+                },
+            },
+            "required": ["assessments"],
+        },
+        handler=_handle_assess_vulnerabilities,
     )
 
 
@@ -445,7 +547,187 @@ async def _handle_run_vulnerability_scan(
 
     if total_vulns > 0:
         lines.append(
-            "\nUse get_sbom_components or list_findings to see details."
+            "\nUse list_vulnerabilities_for_assessment to review and "
+            "assess_vulnerabilities to triage CVEs in context."
         )
 
     return "\n".join(lines)
+
+
+async def _handle_list_vulnerabilities_for_assessment(
+    input: dict, context: ToolContext
+) -> str:
+    """List vulnerabilities for AI triage/assessment."""
+    status_filter = input.get("status_filter", "open")
+    severity_filter = input.get("severity_filter")
+    unassessed_only = input.get("unassessed_only", True)
+    offset = input.get("offset", 0)
+    limit = min(input.get("limit", 50), 50)
+
+    stmt = (
+        select(SbomVulnerability, SbomComponent.name, SbomComponent.version)
+        .join(
+            SbomComponent,
+            SbomVulnerability.component_id == SbomComponent.id,
+        )
+        .where(SbomVulnerability.firmware_id == context.firmware_id)
+    )
+
+    if status_filter:
+        stmt = stmt.where(
+            SbomVulnerability.resolution_status == status_filter
+        )
+    if severity_filter:
+        stmt = stmt.where(SbomVulnerability.severity == severity_filter)
+    if unassessed_only:
+        stmt = stmt.where(SbomVulnerability.adjusted_severity.is_(None))
+
+    # Get total count before pagination
+    count_stmt = select(func.count()).select_from(stmt.subquery())
+    total = await context.db.scalar(count_stmt) or 0
+
+    stmt = (
+        stmt.order_by(SbomVulnerability.cvss_score.desc().nullslast())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    result = await context.db.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        filters = []
+        if status_filter:
+            filters.append(f"status={status_filter}")
+        if severity_filter:
+            filters.append(f"severity={severity_filter}")
+        if unassessed_only:
+            filters.append("unassessed only")
+        filter_str = f" ({', '.join(filters)})" if filters else ""
+        return f"No vulnerabilities found{filter_str}."
+
+    lines = [
+        f"Vulnerabilities for assessment ({offset + 1}-{offset + len(rows)} of {total}):\n"
+    ]
+
+    for vuln, comp_name, comp_version in rows:
+        score_str = f" CVSS {vuln.cvss_score}" if vuln.cvss_score else ""
+        desc_snippet = ""
+        if vuln.description:
+            desc_snippet = vuln.description[:150]
+            if len(vuln.description) > 150:
+                desc_snippet += "..."
+        version_str = f" {comp_version}" if comp_version else ""
+
+        lines.append(
+            f"- ID: {vuln.id}\n"
+            f"  {vuln.cve_id} [{vuln.severity.upper()}{score_str}] "
+            f"in {comp_name}{version_str}\n"
+            f"  {desc_snippet}"
+        )
+
+    if offset + len(rows) < total:
+        lines.append(
+            f"\n{total - offset - len(rows)} more. Use offset={offset + limit} to see next batch."
+        )
+
+    return "\n".join(lines)
+
+
+async def _handle_assess_vulnerabilities(
+    input: dict, context: ToolContext
+) -> str:
+    """Batch-assess vulnerabilities: adjust severity and/or resolve."""
+    assessments = input.get("assessments", [])
+    if not assessments:
+        return "No assessments provided."
+    if len(assessments) > 50:
+        return "Maximum 50 assessments per call."
+
+    # Collect all vulnerability IDs
+    vuln_ids = []
+    for a in assessments:
+        vid = a.get("vulnerability_id")
+        if vid:
+            try:
+                vuln_ids.append(str(vid))
+            except (ValueError, TypeError):
+                pass
+
+    # Load all referenced vulnerabilities in one query
+    import uuid as _uuid
+
+    parsed_ids = []
+    for vid in vuln_ids:
+        try:
+            parsed_ids.append(_uuid.UUID(vid))
+        except ValueError:
+            pass
+
+    stmt = (
+        select(SbomVulnerability)
+        .where(
+            SbomVulnerability.id.in_(parsed_ids),
+            SbomVulnerability.firmware_id == context.firmware_id,
+        )
+    )
+    result = await context.db.execute(stmt)
+    vuln_map = {str(v.id): v for v in result.scalars().all()}
+
+    lines = []
+    updated = 0
+    not_found = 0
+
+    for a in assessments:
+        vid = a.get("vulnerability_id", "")
+        rationale = a.get("rationale", "")
+        vuln = vuln_map.get(vid)
+
+        if not vuln:
+            lines.append(f"  {vid[:8]}...: NOT FOUND")
+            not_found += 1
+            continue
+
+        old_sev = vuln.severity
+        new_sev = a.get("adjusted_severity")
+        new_score = a.get("adjusted_cvss_score")
+        new_status = a.get("resolution_status")
+
+        # Apply adjusted severity
+        if new_sev:
+            vuln.adjusted_severity = new_sev
+        if new_score is not None:
+            vuln.adjusted_cvss_score = new_score
+        if rationale:
+            vuln.adjustment_rationale = rationale
+            vuln.resolution_justification = rationale
+
+        # Apply resolution status
+        if new_status:
+            vuln.resolution_status = new_status
+            if new_status in ("resolved", "ignored", "false_positive"):
+                vuln.resolved_by = "ai"
+                vuln.resolved_at = datetime.utcnow()
+            elif new_status == "open":
+                vuln.resolved_by = None
+                vuln.resolved_at = None
+
+        # Build summary line
+        sev_change = ""
+        if new_sev and new_sev != old_sev:
+            sev_change = f" {old_sev} -> {new_sev}"
+        elif new_sev:
+            sev_change = f" {old_sev} (unchanged)"
+
+        status_str = f" [{new_status}]" if new_status else " [open]"
+        lines.append(f"  {vuln.cve_id}:{sev_change}{status_str}")
+        updated += 1
+
+    await context.db.commit()
+
+    header = f"Assessed {updated} vulnerability(ies)"
+    if not_found:
+        header += f", {not_found} not found"
+    header += ":\n"
+
+    return header + "\n".join(lines)

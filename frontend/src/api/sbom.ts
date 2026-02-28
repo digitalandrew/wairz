@@ -4,6 +4,7 @@ import type {
   SbomGenerateResponse,
   SbomSummary,
   SbomVulnerability,
+  VulnerabilityUpdate,
   VulnerabilityScanResult,
 } from '@/types'
 
@@ -55,11 +56,23 @@ export async function runVulnerabilityScan(
 
 export async function getVulnerabilities(
   projectId: string,
-  filters?: { severity?: string; component_id?: string; cve_id?: string },
+  filters?: { severity?: string; component_id?: string; cve_id?: string; resolution_status?: string },
 ): Promise<SbomVulnerability[]> {
   const { data } = await apiClient.get<SbomVulnerability[]>(
     `/projects/${projectId}/sbom/vulnerabilities`,
     { params: filters },
+  )
+  return data
+}
+
+export async function updateVulnerability(
+  projectId: string,
+  vulnerabilityId: string,
+  body: VulnerabilityUpdate,
+): Promise<SbomVulnerability> {
+  const { data } = await apiClient.patch<SbomVulnerability>(
+    `/projects/${projectId}/sbom/vulnerabilities/${vulnerabilityId}`,
+    body,
   )
   return data
 }

@@ -1,7 +1,15 @@
 import uuid
 from datetime import datetime
+from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+
+class VulnerabilityResolutionStatus(str, Enum):
+    open = "open"
+    resolved = "resolved"
+    ignored = "ignored"
+    false_positive = "false_positive"
 
 
 class SbomComponentResponse(BaseModel):
@@ -44,6 +52,32 @@ class SbomVulnerabilityResponse(BaseModel):
     component_name: str | None = None
     component_version: str | None = None
 
+    # Resolution fields
+    resolution_status: str = "open"
+    resolution_justification: str | None = None
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
+
+    # AI-adjusted severity
+    adjusted_cvss_score: float | None = None
+    adjusted_severity: str | None = None
+    adjustment_rationale: str | None = None
+
+    @computed_field
+    @property
+    def effective_severity(self) -> str:
+        return self.adjusted_severity if self.adjusted_severity else self.severity
+
+    @computed_field
+    @property
+    def effective_cvss_score(self) -> float | None:
+        return self.adjusted_cvss_score if self.adjusted_cvss_score is not None else self.cvss_score
+
+
+class VulnerabilityUpdateRequest(BaseModel):
+    resolution_status: VulnerabilityResolutionStatus | None = None
+    resolution_justification: str | None = None
+
 
 class VulnerabilityScanRequest(BaseModel):
     force_rescan: bool = False
@@ -64,3 +98,5 @@ class SbomSummaryResponse(BaseModel):
     total_vulnerabilities: int
     vulns_by_severity: dict[str, int]
     scan_date: datetime | None
+    open_count: int = 0
+    resolved_count: int = 0

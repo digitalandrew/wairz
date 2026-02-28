@@ -199,6 +199,8 @@ export interface SbomComponent {
   created_at: string
 }
 
+export type VulnerabilityResolutionStatus = 'open' | 'resolved' | 'ignored' | 'false_positive'
+
 export interface SbomVulnerability {
   id: string
   component_id: string
@@ -211,6 +213,20 @@ export interface SbomVulnerability {
   finding_id: string | null
   component_name: string | null
   component_version: string | null
+  resolution_status: VulnerabilityResolutionStatus
+  resolution_justification: string | null
+  resolved_by: string | null
+  resolved_at: string | null
+  adjusted_cvss_score: number | null
+  adjusted_severity: Severity | null
+  adjustment_rationale: string | null
+  effective_severity: Severity
+  effective_cvss_score: number | null
+}
+
+export interface VulnerabilityUpdate {
+  resolution_status?: VulnerabilityResolutionStatus
+  resolution_justification?: string
 }
 
 export interface SbomGenerateResponse {
@@ -226,6 +242,8 @@ export interface SbomSummary {
   total_vulnerabilities: number
   vulns_by_severity: Record<string, number>
   scan_date: string | null
+  open_count: number
+  resolved_count: number
 }
 
 export interface VulnerabilityScanResult {

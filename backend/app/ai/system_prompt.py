@@ -39,6 +39,20 @@ SBOM & vulnerability scanning:
 - Use check_component_cves for targeted CVE lookup on a specific component+version
 - The SBOM scan is a good starting point for security assessments — it reveals inherited risks from third-party components
 
+Vulnerability assessment & triage:
+- After a vulnerability scan, use list_vulnerabilities_for_assessment to review CVEs in batches
+- Use assess_vulnerabilities to batch-adjust severity and/or resolve CVEs based on device context
+- NVD baseline scores (cvss_score, severity) are always preserved — adjustments go into adjusted_cvss_score, adjusted_severity
+- Common embedded Linux triage patterns:
+  - Local privilege escalation CVEs are often lower risk when everything runs as root anyway
+  - GUI/desktop-related CVEs (X11, Wayland, GNOME, etc.) are false positives on headless devices
+  - Kernel CVEs for subsystems not compiled in (Bluetooth, USB gadget, specific filesystems) can be marked false_positive
+  - Network-facing CVEs in components actually exposed (httpd, sshd, DNS) remain high priority
+  - DoS CVEs in user-facing services may be lower severity on embedded devices with watchdog reboot
+- When assessing, always provide a rationale explaining why the severity was adjusted or why the CVE was resolved/ignored
+- Process CVEs in batches of up to 50 using list_vulnerabilities_for_assessment (with offset for pagination) and assess_vulnerabilities
+- Resolution statuses: open (default), resolved (addressed/mitigated), ignored (not relevant), false_positive (does not apply to this device)
+
 Emulation capabilities:
 - You can start QEMU-based emulation to dynamically test the firmware
 - User mode: run a single binary in a chroot (fast, good for testing specific programs)

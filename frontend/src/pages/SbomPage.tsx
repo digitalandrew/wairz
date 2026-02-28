@@ -14,6 +14,9 @@ import {
   ExternalLink,
   ChevronDown,
   ChevronRight,
+  Bot,
+  MoreHorizontal,
+  X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -26,12 +29,14 @@ import {
   runVulnerabilityScan,
   getVulnerabilities,
   getVulnerabilitySummary,
+  updateVulnerability,
 } from '@/api/sbom'
 import type {
   SbomComponent,
   SbomVulnerability,
   SbomSummary,
   Severity,
+  VulnerabilityResolutionStatus,
   VulnerabilityScanResult,
 } from '@/types'
 
@@ -57,6 +62,15 @@ const CONFIDENCE_DESCRIPTION: Record<string, string> = {
   low: 'Low confidence — identified from config files or heuristic matching',
 }
 
+const RESOLUTION_CONFIG: Record<VulnerabilityResolutionStatus, { label: string; className: string }> = {
+  open: { label: 'Open', className: 'bg-blue-500/10 text-blue-500 border-blue-500/30' },
+  resolved: { label: 'Resolved', className: 'bg-green-500/10 text-green-500 border-green-500/30' },
+  ignored: { label: 'Ignored', className: 'bg-gray-500/10 text-gray-400 border-gray-500/30' },
+  false_positive: { label: 'False Positive', className: 'bg-purple-500/10 text-purple-500 border-purple-500/30' },
+}
+
+type ResolutionFilter = VulnerabilityResolutionStatus | 'all'
+
 type Tab = 'components' | 'vulnerabilities'
 
 export default function SbomPage() {
@@ -74,7 +88,14 @@ export default function SbomPage() {
   const [typeFilter, setTypeFilter] = useState<string | null>(null)
   const [nameSearch, setNameSearch] = useState('')
   const [sevFilter, setSevFilter] = useState<string | null>(null)
+  const [resolutionFilter, setResolutionFilter] = useState<ResolutionFilter>('open')
   const [expandedComp, setExpandedComp] = useState<string | null>(null)
+  const [actionMenuId, setActionMenuId] = useState<string | null>(null)
+  const [justificationDialog, setJustificationDialog] = useState<{
+    vulnId: string
+    status: VulnerabilityResolutionStatus
+  } | null>(null)
+  const [justificationText, setJustificationText] = useState('')
 
   // Load data on mount
   const loadData = useCallback(async () => {
@@ -89,17 +110,51 @@ export default function SbomPage() {
       setSummary(summary)
 
       if (summary && summary.total_vulnerabilities > 0) {
-        const vulns = await getVulnerabilities(projectId).catch(() => [])
+        const filters: { resolution_status?: string } = {}
+        if (resolutionFilter !== 'all') {
+          filters.resolution_status = resolutionFilter
+        }
+        const vulns = await getVulnerabilities(projectId, filters).catch(() => [])
         setVulnerabilities(vulns)
       }
     } finally {
       setLoading(false)
     }
-  }, [projectId])
+  }, [projectId, resolutionFilter])
 
   useEffect(() => {
     loadData()
   }, [loadData])
+
+  // Reload vulns when resolution filter changes (without full reload)
+  const reloadVulns = useCallback(async () => {
+    if (!projectId) return
+    const filters: { resolution_status?: string } = {}
+    if (resolutionFilter !== 'all') {
+      filters.resolution_status = resolutionFilter
+    }
+    const vulns = await getVulnerabilities(projectId, filters).catch(() => [])
+    setVulnerabilities(vulns)
+    const s = await getVulnerabilitySummary(projectId).catch(() => null)
+    setSummary(s)
+  }, [projectId, resolutionFilter])
+
+  // Handle resolution status update
+  const handleResolve = useCallback(async (vulnId: string, status: VulnerabilityResolutionStatus, justification?: string) => {
+    if (!projectId) return
+    try {
+      await updateVulnerability(projectId, vulnId, {
+        resolution_status: status,
+        resolution_justification: justification,
+      })
+      await reloadVulns()
+    } catch (err) {
+      console.error('Failed to update vulnerability:', err)
+    }
+    setActionMenuId(null)
+    setJustificationDialog(null)
+    setJustificationText('')
+  }, [projectId, reloadVulns])
 
   // Generate SBOM
   const handleGenerate = useCallback(async (force = false) => {
@@ -249,9 +304,10 @@ export default function SbomPage() {
             alert={((summary.vulns_by_severity['critical'] ?? 0) + (summary.vulns_by_severity['high'] ?? 0)) > 0}
           />
           <SummaryCard
-            label="Medium / Low"
-            value={(summary.vulns_by_severity['medium'] ?? 0) + (summary.vulns_by_severity['low'] ?? 0)}
-            detail={`${summary.vulns_by_severity['medium'] ?? 0} medium, ${summary.vulns_by_severity['low'] ?? 0} low`}
+            label="Open / Resolved"
+            value={summary.open_count}
+            detail={`${summary.open_count} open, ${summary.resolved_count} resolved`}
+            alert={summary.open_count > 0}
           />
         </div>
       )}
@@ -260,7 +316,7 @@ export default function SbomPage() {
       {hasComponents && (
         <div className="flex items-center gap-3">
           <Button
-            onClick={() => handleScan(false)}
+            onClick={() => handleScan(hasVulns)}
             disabled={scanning}
             variant={hasVulns ? 'outline' : 'default'}
             size="sm"
@@ -323,6 +379,15 @@ export default function SbomPage() {
               vulnerabilities={filteredVulns}
               sevFilter={sevFilter}
               onSevFilter={setSevFilter}
+              resolutionFilter={resolutionFilter}
+              onResolutionFilter={setResolutionFilter}
+              actionMenuId={actionMenuId}
+              onActionMenu={setActionMenuId}
+              onResolve={handleResolve}
+              justificationDialog={justificationDialog}
+              onJustificationDialog={setJustificationDialog}
+              justificationText={justificationText}
+              onJustificationText={setJustificationText}
             />
           )}
         </>
@@ -514,13 +579,44 @@ function ComponentsTab({ components, typeFilter, nameSearch, onTypeFilter, onNam
 
 // ── Vulnerabilities Tab ──
 
-function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter }: {
+function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutionFilter, onResolutionFilter, actionMenuId, onActionMenu, onResolve, justificationDialog, onJustificationDialog, justificationText, onJustificationText }: {
   vulnerabilities: SbomVulnerability[]
   sevFilter: string | null
   onSevFilter: (s: string | null) => void
+  resolutionFilter: ResolutionFilter
+  onResolutionFilter: (f: ResolutionFilter) => void
+  actionMenuId: string | null
+  onActionMenu: (id: string | null) => void
+  onResolve: (vulnId: string, status: VulnerabilityResolutionStatus, justification?: string) => void
+  justificationDialog: { vulnId: string; status: VulnerabilityResolutionStatus } | null
+  onJustificationDialog: (d: { vulnId: string; status: VulnerabilityResolutionStatus } | null) => void
+  justificationText: string
+  onJustificationText: (t: string) => void
 }) {
   return (
     <div className="space-y-4">
+      {/* Resolution status filter */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">Status:</span>
+        {(['open', 'ignored', 'false_positive', 'all'] as ResolutionFilter[]).map((f) => {
+          const active = resolutionFilter === f
+          const label = f === 'all' ? 'All' : f === 'false_positive' ? 'False Positive' : f.charAt(0).toUpperCase() + f.slice(1)
+          return (
+            <button
+              key={f}
+              onClick={() => onResolutionFilter(f)}
+              className={`rounded-full border px-2 py-0.5 text-xs font-medium transition-colors ${
+                active
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {label}
+            </button>
+          )
+        })}
+      </div>
+
       {/* Severity filter */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">Severity:</span>
@@ -544,10 +640,41 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter }: {
         <span className="ml-auto text-xs text-muted-foreground">{vulnerabilities.length} vulnerability(ies)</span>
       </div>
 
+      {/* Justification dialog */}
+      {justificationDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="mx-4 w-full max-w-md rounded-lg border border-border bg-background p-4 shadow-lg">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium">
+                {justificationDialog.status === 'ignored' ? 'Ignore Vulnerability' : 'Mark as False Positive'}
+              </h3>
+              <button onClick={() => { onJustificationDialog(null); onJustificationText('') }} className="text-muted-foreground hover:text-foreground">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <textarea
+              value={justificationText}
+              onChange={(e) => onJustificationText(e.target.value)}
+              placeholder="Justification (optional)..."
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+              rows={3}
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => { onJustificationDialog(null); onJustificationText('') }}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={() => onResolve(justificationDialog.vulnId, justificationDialog.status, justificationText || undefined)}>
+                Confirm
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Vulnerability list */}
       {vulnerabilities.length === 0 ? (
         <div className="py-8 text-center text-sm text-muted-foreground">
-          {sevFilter ? 'No vulnerabilities match the current filter.' : 'No vulnerabilities found. Run a scan first.'}
+          {sevFilter || resolutionFilter !== 'open' ? 'No vulnerabilities match the current filters.' : 'No vulnerabilities found. Run a scan first.'}
         </div>
       ) : (
         <div className="overflow-x-auto">
@@ -558,13 +685,19 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter }: {
                 <th className="py-2 pr-4 font-medium">Component</th>
                 <th className="py-2 pr-4 font-medium">CVSS</th>
                 <th className="py-2 pr-4 font-medium">Severity</th>
-                <th className="py-2 font-medium">Description</th>
+                <th className="py-2 pr-4 font-medium">Status</th>
+                <th className="py-2 pr-4 font-medium">Description</th>
+                <th className="py-2 font-medium w-10"></th>
               </tr>
             </thead>
             <tbody>
               {vulnerabilities.map((v) => {
-                const sevConfig = SEVERITY_CONFIG[v.severity] ?? SEVERITY_CONFIG.medium
+                const effectiveSev = v.effective_severity ?? v.severity
+                const sevConfig = SEVERITY_CONFIG[effectiveSev] ?? SEVERITY_CONFIG.medium
                 const Icon = sevConfig.icon
+                const hasAdjustment = v.adjusted_severity && v.adjusted_severity !== v.severity
+                const hasScoreAdjustment = v.adjusted_cvss_score != null && v.adjusted_cvss_score !== v.cvss_score
+                const resConfig = RESOLUTION_CONFIG[v.resolution_status] ?? RESOLUTION_CONFIG.open
                 return (
                   <tr key={v.id} className="border-b border-border/50 hover:bg-accent/30">
                     <td className="py-2 pr-4">
@@ -585,16 +718,94 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter }: {
                       )}
                     </td>
                     <td className="py-2 pr-4 font-mono">
-                      {v.cvss_score != null ? v.cvss_score.toFixed(1) : '—'}
+                      {hasScoreAdjustment ? (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span>
+                                {v.effective_cvss_score != null ? v.effective_cvss_score.toFixed(1) : '—'}
+                                <span className="ml-1 text-muted-foreground/50 line-through text-[10px]">
+                                  {v.cvss_score != null ? v.cvss_score.toFixed(1) : ''}
+                                </span>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-72 text-xs">
+                              {v.adjustment_rationale ?? 'AI-adjusted score'}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : (
+                        v.cvss_score != null ? v.cvss_score.toFixed(1) : '—'
+                      )}
                     </td>
                     <td className="py-2 pr-4">
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${sevConfig.bg}`}>
-                        <Icon className="h-2.5 w-2.5" />
-                        {v.severity}
+                      {hasAdjustment ? (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex items-center gap-1">
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${sevConfig.bg}`}>
+                                  <Icon className="h-2.5 w-2.5" />
+                                  {effectiveSev}
+                                </span>
+                                <span className="text-[10px] text-muted-foreground/50 line-through">{v.severity}</span>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-72 text-xs">
+                              {v.adjustment_rationale ?? 'AI-adjusted severity'}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : (
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${sevConfig.bg}`}>
+                          <Icon className="h-2.5 w-2.5" />
+                          {effectiveSev}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-4">
+                      <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${resConfig.className}`}>
+                        {v.resolved_by === 'ai' && <Bot className="h-2.5 w-2.5" />}
+                        {resConfig.label}
                       </span>
                     </td>
-                    <td className="max-w-md truncate py-2 text-xs text-muted-foreground">
+                    <td className="max-w-sm truncate py-2 text-xs text-muted-foreground">
                       {v.description ?? '—'}
+                    </td>
+                    <td className="py-2 relative">
+                      <button
+                        onClick={() => onActionMenu(actionMenuId === v.id ? null : v.id)}
+                        className="rounded p-1 hover:bg-accent text-muted-foreground hover:text-foreground"
+                      >
+                        <MoreHorizontal className="h-3.5 w-3.5" />
+                      </button>
+                      {actionMenuId === v.id && (
+                        <div className="absolute right-0 top-full z-10 mt-1 w-44 rounded-md border border-border bg-popover p-1 shadow-md">
+                          {v.resolution_status === 'open' ? (
+                            <>
+                              <button
+                                onClick={() => { onActionMenu(null); onJustificationDialog({ vulnId: v.id, status: 'ignored' }) }}
+                                className="w-full rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                              >
+                                Mark as Ignored
+                              </button>
+                              <button
+                                onClick={() => { onActionMenu(null); onJustificationDialog({ vulnId: v.id, status: 'false_positive' }) }}
+                                className="w-full rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                              >
+                                Mark as False Positive
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              onClick={() => onResolve(v.id, 'open')}
+                              className="w-full rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                            >
+                              Reopen
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )

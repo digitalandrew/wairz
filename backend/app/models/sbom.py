@@ -68,10 +68,24 @@ class SbomVulnerability(Base):
     )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
+    # Resolution
+    resolution_status: Mapped[str] = mapped_column(
+        String(20), default="open", server_default="open"
+    )
+    resolution_justification: Mapped[str | None] = mapped_column(Text)
+    resolved_by: Mapped[str | None] = mapped_column(String(50))  # "user" | "ai"
+    resolved_at: Mapped[datetime | None] = mapped_column()
+
+    # AI-adjusted severity (NVD originals stay as cvss_score / severity)
+    adjusted_cvss_score: Mapped[float | None] = mapped_column(Numeric(3, 1))
+    adjusted_severity: Mapped[str | None] = mapped_column(String(20))
+    adjustment_rationale: Mapped[str | None] = mapped_column(Text)
+
     component: Mapped["SbomComponent"] = relationship(back_populates="vulnerabilities")
 
     __table_args__ = (
         Index("idx_sbom_vulns_component", "component_id"),
         Index("idx_sbom_vulns_firmware", "firmware_id"),
         Index("idx_sbom_vulns_cve", "cve_id"),
+        Index("idx_sbom_vulns_resolution", "resolution_status"),
     )
