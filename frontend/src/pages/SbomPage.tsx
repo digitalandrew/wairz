@@ -610,6 +610,7 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
   justificationText: string
   onJustificationText: (t: string) => void
 }) {
+  const [selectedVuln, setSelectedVuln] = useState<string | null>(null)
   const [sortColumn, setSortColumn] = useState<SortColumn>('severity')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
 
@@ -795,13 +796,14 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
                 const hasScoreAdjustment = v.adjusted_cvss_score != null && v.adjusted_cvss_score !== v.cvss_score
                 const resConfig = RESOLUTION_CONFIG[v.resolution_status] ?? RESOLUTION_CONFIG.open
                 return (
-                  <tr key={v.id} className="border-b border-border/50 hover:bg-accent/30">
+                  <tr key={v.id} className="border-b border-border/50 hover:bg-accent/30 cursor-pointer" onClick={() => setSelectedVuln(v.id)}>
                     <td className="py-2 pr-4">
                       <a
                         href={`https://nvd.nist.gov/vuln/detail/${v.cve_id}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1 font-mono text-xs text-primary hover:underline"
+                        onClick={(e) => e.stopPropagation()}
                       >
                         {v.cve_id}
                         <ExternalLink className="h-2.5 w-2.5" />
@@ -868,7 +870,7 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
                     <td className="max-w-sm truncate py-2 text-xs text-muted-foreground">
                       {v.description ?? '—'}
                     </td>
-                    <td className="py-2 relative">
+                    <td className="py-2 relative" onClick={(e) => e.stopPropagation()}>
                       <button
                         onClick={() => onActionMenu(actionMenuId === v.id ? null : v.id)}
                         className="rounded p-1 hover:bg-accent text-muted-foreground hover:text-foreground"
@@ -910,6 +912,183 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
           </table>
         </div>
       )}
+
+      {/* Detail modal */}
+      {selectedVuln && (() => {
+        const v = sortedVulns.find(x => x.id === selectedVuln)
+        if (!v) return null
+        return (
+          <VulnerabilityDetailModal
+            vuln={v}
+            onClose={() => setSelectedVuln(null)}
+          />
+        )
+      })()}
+    </div>
+  )
+}
+
+// ── Vulnerability Detail Modal ──
+
+function VulnerabilityDetailModal({ vuln: v, onClose }: {
+  vuln: SbomVulnerability
+  onClose: () => void
+}) {
+  const effectiveSev = v.effective_severity ?? v.severity
+  const sevConfig = SEVERITY_CONFIG[effectiveSev] ?? SEVERITY_CONFIG.medium
+  const Icon = sevConfig.icon
+  const hasAdjustment = v.adjusted_severity && v.adjusted_severity !== v.severity
+  const hasScoreAdjustment = v.adjusted_cvss_score != null && v.adjusted_cvss_score !== v.cvss_score
+  const resConfig = RESOLUTION_CONFIG[v.resolution_status] ?? RESOLUTION_CONFIG.open
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="mx-4 w-full max-w-2xl max-h-[80vh] overflow-y-auto rounded-lg border border-border bg-background shadow-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-background px-5 py-3">
+          <div className="flex items-center gap-3">
+            <a
+              href={`https://nvd.nist.gov/vuln/detail/${v.cve_id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 font-mono text-sm font-semibold text-primary hover:underline"
+            >
+              {v.cve_id}
+              <ExternalLink className="h-3 w-3" />
+            </a>
+            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${sevConfig.bg}`}>
+              <Icon className="h-2.5 w-2.5" />
+              {effectiveSev}
+            </span>
+            {hasAdjustment && (
+              <span className="text-[10px] text-muted-foreground/60 line-through">{v.severity}</span>
+            )}
+          </div>
+          <button onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-5 px-5 py-4">
+          {/* Summary row */}
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">CVSS Score</p>
+              <p className="mt-0.5 font-mono text-sm font-semibold">
+                {v.effective_cvss_score != null ? v.effective_cvss_score.toFixed(1) : v.cvss_score != null ? v.cvss_score.toFixed(1) : '—'}
+                {hasScoreAdjustment && (
+                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground/50 line-through">
+                    {v.cvss_score != null ? v.cvss_score.toFixed(1) : ''}
+                  </span>
+                )}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Status</p>
+              <p className="mt-0.5">
+                <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${resConfig.className}`}>
+                  {v.resolved_by === 'ai' && <Bot className="h-2.5 w-2.5" />}
+                  {resConfig.label}
+                </span>
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Component</p>
+              <p className="mt-0.5 text-sm">
+                <span className="font-medium">{v.component_name}</span>
+                {v.component_version && (
+                  <span className="ml-1 font-mono text-muted-foreground">{v.component_version}</span>
+                )}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Published</p>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                {v.published_date ? formatDate(v.published_date) : '—'}
+              </p>
+            </div>
+          </div>
+
+          {/* CVSS Vector */}
+          {v.cvss_vector && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">CVSS Vector</p>
+              <p className="mt-1 font-mono text-xs text-muted-foreground break-all">{v.cvss_vector}</p>
+            </div>
+          )}
+
+          {/* Description */}
+          <div>
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Description</p>
+            <p className="mt-1 text-sm leading-relaxed">{v.description ?? 'No description available.'}</p>
+          </div>
+
+          {/* AI Assessment */}
+          {(hasAdjustment || hasScoreAdjustment || v.adjustment_rationale) && (
+            <div className="rounded-md border border-border bg-muted/30 p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Bot className="h-3.5 w-3.5 text-muted-foreground" />
+                <p className="text-xs font-medium">AI Assessment</p>
+              </div>
+              {(hasAdjustment || hasScoreAdjustment) && (
+                <div className="mb-2 flex flex-wrap items-center gap-3 text-xs">
+                  {hasAdjustment && (
+                    <span>
+                      Severity: <span className="line-through text-muted-foreground">{v.severity}</span>
+                      {' → '}
+                      <span className="font-medium">{v.adjusted_severity}</span>
+                    </span>
+                  )}
+                  {hasScoreAdjustment && (
+                    <span>
+                      CVSS: <span className="line-through text-muted-foreground">{v.cvss_score?.toFixed(1)}</span>
+                      {' → '}
+                      <span className="font-medium">{v.adjusted_cvss_score?.toFixed(1)}</span>
+                    </span>
+                  )}
+                </div>
+              )}
+              {v.adjustment_rationale && (
+                <p className="text-sm leading-relaxed text-muted-foreground">{v.adjustment_rationale}</p>
+              )}
+            </div>
+          )}
+
+          {/* Resolution details */}
+          {v.resolution_status !== 'open' && (
+            <div className="rounded-md border border-border bg-muted/30 p-4">
+              <p className="text-xs font-medium mb-2">Resolution</p>
+              <div className="space-y-1.5 text-sm">
+                <div className="flex gap-2">
+                  <span className="text-xs text-muted-foreground w-20 shrink-0">Status:</span>
+                  <span className="text-xs">{resConfig.label}</span>
+                </div>
+                {v.resolved_by && (
+                  <div className="flex gap-2">
+                    <span className="text-xs text-muted-foreground w-20 shrink-0">Resolved by:</span>
+                    <span className="text-xs">{v.resolved_by === 'ai' ? 'AI Assistant' : 'User'}</span>
+                  </div>
+                )}
+                {v.resolved_at && (
+                  <div className="flex gap-2">
+                    <span className="text-xs text-muted-foreground w-20 shrink-0">Resolved at:</span>
+                    <span className="text-xs">{formatDate(v.resolved_at)}</span>
+                  </div>
+                )}
+                {v.resolution_justification && (
+                  <div className="mt-2">
+                    <span className="text-xs text-muted-foreground">Justification:</span>
+                    <p className="mt-1 text-sm leading-relaxed">{v.resolution_justification}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
