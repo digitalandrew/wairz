@@ -53,6 +53,10 @@ Optional:
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (for local development only)
 
+## Public Beta
+
+WAIRZ is currently in **public beta**. You may encounter bugs or rough edges. If you run into any issues, please [open an issue on GitHub](https://github.com/digitalandrew/wairz/issues) or reach out at andrew@digitalandrew.io.
+
 ## Quick Start
 
 ### Docker (recommended)
