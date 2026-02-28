@@ -57,6 +57,8 @@ Optional:
 
 WAIRZ is currently in **public beta**. You may encounter bugs or rough edges. If you run into any issues, please [open an issue on GitHub](https://github.com/digitalandrew/wairz/issues) or reach out at andrew@digitalandrew.io.
 
+WAIRZ is currently designed for **embedded Linux** firmware samples. Support for RTOS and bare-metal firmware is planned for future releases.
+
 ## Quick Start
 
 ### Docker (recommended)
