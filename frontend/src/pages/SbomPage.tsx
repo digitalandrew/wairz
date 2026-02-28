@@ -921,6 +921,7 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
           <VulnerabilityDetailModal
             vuln={v}
             onClose={() => setSelectedVuln(null)}
+            onResolve={onResolve}
           />
         )
       })()}
@@ -930,16 +931,35 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
 
 // ── Vulnerability Detail Modal ──
 
-function VulnerabilityDetailModal({ vuln: v, onClose }: {
+function VulnerabilityDetailModal({ vuln: v, onClose, onResolve }: {
   vuln: SbomVulnerability
   onClose: () => void
+  onResolve: (vulnId: string, status: VulnerabilityResolutionStatus, justification?: string) => void
 }) {
+  const [pendingAction, setPendingAction] = useState<VulnerabilityResolutionStatus | null>(null)
+  const [justification, setJustification] = useState('')
+
   const effectiveSev = v.effective_severity ?? v.severity
   const sevConfig = SEVERITY_CONFIG[effectiveSev] ?? SEVERITY_CONFIG.medium
   const Icon = sevConfig.icon
   const hasAdjustment = v.adjusted_severity && v.adjusted_severity !== v.severity
   const hasScoreAdjustment = v.adjusted_cvss_score != null && v.adjusted_cvss_score !== v.cvss_score
   const resConfig = RESOLUTION_CONFIG[v.resolution_status] ?? RESOLUTION_CONFIG.open
+
+  const handleAction = (status: VulnerabilityResolutionStatus) => {
+    if (status === 'open') {
+      onResolve(v.id, 'open')
+      return
+    }
+    setPendingAction(status)
+  }
+
+  const confirmAction = () => {
+    if (!pendingAction) return
+    onResolve(v.id, pendingAction, justification || undefined)
+    setPendingAction(null)
+    setJustification('')
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -1087,6 +1107,50 @@ function VulnerabilityDetailModal({ vuln: v, onClose }: {
               </div>
             </div>
           )}
+
+          {/* Actions */}
+          <div className="border-t border-border pt-4">
+            {pendingAction ? (
+              <div className="space-y-3">
+                <p className="text-xs font-medium">
+                  {pendingAction === 'ignored' ? 'Ignore Vulnerability' : 'Mark as False Positive'}
+                </p>
+                <textarea
+                  value={justification}
+                  onChange={(e) => setJustification(e.target.value)}
+                  placeholder="Justification (optional)..."
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  rows={2}
+                  autoFocus
+                />
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={() => { setPendingAction(null); setJustification('') }}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={confirmAction}>
+                    Confirm
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                {v.resolution_status === 'open' ? (
+                  <>
+                    <Button variant="outline" size="sm" onClick={() => handleAction('ignored')}>
+                      Mark as Ignored
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => handleAction('false_positive')}>
+                      Mark as False Positive
+                    </Button>
+                  </>
+                ) : (
+                  <Button variant="outline" size="sm" onClick={() => handleAction('open')}>
+                    Reopen
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
