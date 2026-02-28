@@ -1,14 +1,14 @@
 <p align="center">
-  <img src="assets/wairz_secrets.png" alt="Wairz - Every Firmware Has Secrets... WAIRZ Finds Them" width="400">
+  <img src="assets/wairz_banner.png" alt="Wairz - Every Firmware Has Secrets... WAIRZ Finds Them" width="400">
 </p>
 
-# Wairz
+# WAIRZ
 
 **AI-assisted firmware reverse engineering and security assessment platform.**
 
 Upload firmware images, unpack them, explore the filesystem, analyze binaries, and conduct security assessments — all powered by AI analysis via [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
 
-Connect [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Claude Desktop](https://claude.ai/download) to Wairz's 60+ analysis tools through MCP, and use your own Claude subscription for AI-driven firmware security research.
+Connect [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Claude Desktop](https://claude.ai/download) to WAIRZ's 60+ analysis tools through MCP, and use your own Claude subscription for AI-driven firmware security research.
 
 ---
 
@@ -98,7 +98,7 @@ Claude Code / Claude Desktop
 ```
 
 1. **Upload** a firmware image through the web UI
-2. **Wairz unpacks** the firmware automatically (SquashFS, JFFS2, UBIFS, CramFS, ext, CPIO)
+2. **WAIRZ unpacks** the firmware automatically (SquashFS, JFFS2, UBIFS, CramFS, ext, CPIO)
 3. **Explore** the extracted filesystem, analyze binaries, and assess security — through the browser or AI
 4. **Connect Claude** via MCP to run autonomous analysis with 60+ specialized tools
 
@@ -106,4 +106,4 @@ Claude Code / Claude Desktop
 
 ## License
 
-Wairz is open source under the [AGPL-3.0 License](https://github.com/digitalandrew/wairz/blob/main/LICENSE).
+WAIRZ is open source under the [AGPL-3.0 License](https://github.com/digitalandrew/wairz/blob/main/LICENSE).
