@@ -29,5 +29,8 @@ Thumbs.db
 node_modules/
 frontend/dist/
 
+# MkDocs
+site/
+
 # Docker
 docker-compose.override.yml

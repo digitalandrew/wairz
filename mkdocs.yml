@@ -1,0 +1,63 @@
+site_name: Wairz
+site_url: https://wairz.ai
+site_description: AI-assisted firmware reverse engineering and security assessment platform
+repo_url: https://github.com/digitalandrew/wairz
+repo_name: digitalandrew/wairz
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  logo: assets/wairz_logo.png
+  favicon: assets/wairz_logo.png
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quick-start.md
+    - Connecting AI (MCP): getting-started/mcp-setup.md
+  - Features:
+    - File Explorer: features/file-explorer.md
+    - Binary Analysis: features/binary-analysis.md
+    - Security Assessment: features/security-assessment.md
+    - SBOM & CVE Scanning: features/sbom.md
+    - Emulation: features/emulation.md
+    - Fuzzing: features/fuzzing.md
+    - Firmware Comparison: features/comparison.md
+    - UART Console: features/uart.md
+    - Findings & Reports: features/findings.md
+  - MCP Tools Reference: mcp-tools.md
+  - Configuration: configuration.md
+  - Architecture: architecture.md
