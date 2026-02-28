@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/wairz_secrets.png" alt="Wairz - Every Firmware Has Secrets... WAIRZ Finds Them" width="400">
+</p>
+
 # Wairz
 
 **AI-assisted firmware reverse engineering and security assessment platform.**
