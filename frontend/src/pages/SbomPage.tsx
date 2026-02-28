@@ -687,7 +687,7 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
       {/* Resolution status filter */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">Status:</span>
-        {(['open', 'ignored', 'false_positive', 'all'] as ResolutionFilter[]).map((f) => {
+        {(['open', 'resolved', 'ignored', 'false_positive', 'all'] as ResolutionFilter[]).map((f) => {
           const active = resolutionFilter === f
           const label = f === 'all' ? 'All' : f === 'false_positive' ? 'False Positive' : f.charAt(0).toUpperCase() + f.slice(1)
           return (
@@ -735,7 +735,7 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
           <div className="mx-4 w-full max-w-md rounded-lg border border-border bg-background p-4 shadow-lg">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-medium">
-                {justificationDialog.status === 'ignored' ? 'Ignore Vulnerability' : 'Mark as False Positive'}
+                {justificationDialog.status === 'resolved' ? 'Resolve Vulnerability' : justificationDialog.status === 'ignored' ? 'Ignore Vulnerability' : 'Mark as False Positive'}
               </h3>
               <button onClick={() => { onJustificationDialog(null); onJustificationText('') }} className="text-muted-foreground hover:text-foreground">
                 <X className="h-4 w-4" />
@@ -881,6 +881,12 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
                         <div className="absolute right-0 top-full z-10 mt-1 w-44 rounded-md border border-border bg-popover p-1 shadow-md">
                           {v.resolution_status === 'open' ? (
                             <>
+                              <button
+                                onClick={() => { onActionMenu(null); onJustificationDialog({ vulnId: v.id, status: 'resolved' }) }}
+                                className="w-full rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                              >
+                                Mark as Resolved
+                              </button>
                               <button
                                 onClick={() => { onActionMenu(null); onJustificationDialog({ vulnId: v.id, status: 'ignored' }) }}
                                 className="w-full rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
@@ -1113,7 +1119,7 @@ function VulnerabilityDetailModal({ vuln: v, onClose, onResolve }: {
             {pendingAction ? (
               <div className="space-y-3">
                 <p className="text-xs font-medium">
-                  {pendingAction === 'ignored' ? 'Ignore Vulnerability' : 'Mark as False Positive'}
+                  {pendingAction === 'resolved' ? 'Resolve Vulnerability' : pendingAction === 'ignored' ? 'Ignore Vulnerability' : 'Mark as False Positive'}
                 </p>
                 <textarea
                   value={justification}
@@ -1136,6 +1142,9 @@ function VulnerabilityDetailModal({ vuln: v, onClose, onResolve }: {
               <div className="flex items-center gap-2">
                 {v.resolution_status === 'open' ? (
                   <>
+                    <Button variant="outline" size="sm" onClick={() => handleAction('resolved')}>
+                      Mark as Resolved
+                    </Button>
                     <Button variant="outline" size="sm" onClick={() => handleAction('ignored')}>
                       Mark as Ignored
                     </Button>
