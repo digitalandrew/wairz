@@ -1,9 +1,5 @@
 <p align="center">
-  <img src="frontend/src/assets/wairz_full_logo.png" alt="Wairz" width="400">
-</p>
-
-<p align="center">
-  AI-assisted firmware reverse engineering and security assessment platform.
+  <img src="frontend/src/assets/wairz_secrets.png" alt="Wairz - Every Firmware Has Secrets... WAIRZ Finds Them" width="400">
 </p>
 
 ---
