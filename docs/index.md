@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/wairz_banner.png" alt="Wairz - Every Firmware Has Secrets... WAIRZ Finds Them" width="400">
+  <img src="assets/wairz_banner.png" alt="Wairz - Every Firmware Has Secrets... WAIRZ Finds Them" width="100%">
 </p>
 
 # WAIRZ
