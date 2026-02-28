@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Package,
@@ -17,6 +17,9 @@ import {
   Bot,
   MoreHorizontal,
   X,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -577,6 +580,20 @@ function ComponentsTab({ components, typeFilter, nameSearch, onTypeFilter, onNam
   )
 }
 
+// ── Sorting helpers ──
+
+type SortColumn = 'cve' | 'component' | 'cvss' | 'severity'
+type SortDirection = 'asc' | 'desc'
+
+const SEVERITY_ORDER: Record<string, number> = {
+  critical: 0, high: 1, medium: 2, low: 3, info: 4,
+}
+
+function parseCveId(cveId: string): [number, number] {
+  const m = cveId.match(/CVE-(\d{4})-(\d+)/)
+  return m ? [parseInt(m[1]), parseInt(m[2])] : [9999, 9999]
+}
+
 // ── Vulnerabilities Tab ──
 
 function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutionFilter, onResolutionFilter, actionMenuId, onActionMenu, onResolve, justificationDialog, onJustificationDialog, justificationText, onJustificationText }: {
@@ -593,6 +610,77 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
   justificationText: string
   onJustificationText: (t: string) => void
 }) {
+  const [sortColumn, setSortColumn] = useState<SortColumn>('severity')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
+
+  const handleSort = (col: SortColumn) => {
+    if (sortColumn === col) {
+      setSortDirection(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortColumn(col)
+      setSortDirection('asc')
+    }
+  }
+
+  const componentCveCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const v of vulnerabilities) {
+      const key = v.component_name ?? ''
+      counts[key] = (counts[key] ?? 0) + 1
+    }
+    return counts
+  }, [vulnerabilities])
+
+  const sortedVulns = useMemo(() => {
+    const arr = [...vulnerabilities]
+    const dir = sortDirection === 'asc' ? 1 : -1
+
+    arr.sort((a, b) => {
+      switch (sortColumn) {
+        case 'severity': {
+          const sevA = SEVERITY_ORDER[a.effective_severity ?? a.severity] ?? 3
+          const sevB = SEVERITY_ORDER[b.effective_severity ?? b.severity] ?? 3
+          if (sevA !== sevB) return (sevA - sevB) * dir
+          const cvssA = a.effective_cvss_score ?? a.cvss_score ?? 0
+          const cvssB = b.effective_cvss_score ?? b.cvss_score ?? 0
+          return (cvssB - cvssA) * dir
+        }
+        case 'cvss': {
+          const cvssA = a.effective_cvss_score ?? a.cvss_score ?? 0
+          const cvssB = b.effective_cvss_score ?? b.cvss_score ?? 0
+          return (cvssB - cvssA) * dir
+        }
+        case 'component': {
+          const countA = componentCveCounts[a.component_name ?? ''] ?? 0
+          const countB = componentCveCounts[b.component_name ?? ''] ?? 0
+          if (countA !== countB) return (countB - countA) * dir
+          const nameCompare = (a.component_name ?? '').localeCompare(b.component_name ?? '')
+          if (nameCompare !== 0) return nameCompare
+          const cvssA = a.effective_cvss_score ?? a.cvss_score ?? 0
+          const cvssB = b.effective_cvss_score ?? b.cvss_score ?? 0
+          return cvssB - cvssA
+        }
+        case 'cve': {
+          const [yearA, seqA] = parseCveId(a.cve_id)
+          const [yearB, seqB] = parseCveId(b.cve_id)
+          if (yearA !== yearB) return (yearA - yearB) * dir
+          return (seqA - seqB) * dir
+        }
+        default:
+          return 0
+      }
+    })
+
+    return arr
+  }, [vulnerabilities, sortColumn, sortDirection, componentCveCounts])
+
+  const SortIcon = ({ column }: { column: SortColumn }) => {
+    if (sortColumn !== column) return <ArrowUpDown className="h-3 w-3 text-muted-foreground/30" />
+    return sortDirection === 'asc'
+      ? <ArrowUp className="h-3 w-3" />
+      : <ArrowDown className="h-3 w-3" />
+  }
+
   return (
     <div className="space-y-4">
       {/* Resolution status filter */}
@@ -681,17 +769,25 @@ function VulnerabilitiesTab({ vulnerabilities, sevFilter, onSevFilter, resolutio
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-left text-xs text-muted-foreground">
-                <th className="py-2 pr-4 font-medium">CVE</th>
-                <th className="py-2 pr-4 font-medium">Component</th>
-                <th className="py-2 pr-4 font-medium">CVSS</th>
-                <th className="py-2 pr-4 font-medium">Severity</th>
+                <th className="py-2 pr-4 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => handleSort('cve')}>
+                  <span className="inline-flex items-center gap-1">CVE <SortIcon column="cve" /></span>
+                </th>
+                <th className="py-2 pr-4 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => handleSort('component')}>
+                  <span className="inline-flex items-center gap-1">Component <SortIcon column="component" /></span>
+                </th>
+                <th className="py-2 pr-4 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => handleSort('cvss')}>
+                  <span className="inline-flex items-center gap-1">CVSS <SortIcon column="cvss" /></span>
+                </th>
+                <th className="py-2 pr-4 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => handleSort('severity')}>
+                  <span className="inline-flex items-center gap-1">Severity <SortIcon column="severity" /></span>
+                </th>
                 <th className="py-2 pr-4 font-medium">Status</th>
                 <th className="py-2 pr-4 font-medium">Description</th>
                 <th className="py-2 font-medium w-10"></th>
               </tr>
             </thead>
             <tbody>
-              {vulnerabilities.map((v) => {
+              {sortedVulns.map((v) => {
                 const effectiveSev = v.effective_severity ?? v.severity
                 const sevConfig = SEVERITY_CONFIG[effectiveSev] ?? SEVERITY_CONFIG.medium
                 const Icon = sevConfig.icon
