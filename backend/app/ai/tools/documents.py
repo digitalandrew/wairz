@@ -9,6 +9,43 @@ from app.services.document_service import DocumentService
 
 def register_document_tools(registry: ToolRegistry) -> None:
     registry.register(
+        name="read_scratchpad",
+        description=(
+            "Read the agent scratchpad for the current project. "
+            "The scratchpad persists analysis notes, progress, and context across sessions. "
+            "You should call this tool at the start of each session (alongside read_project_instructions) "
+            "to check for notes left by prior sessions."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        handler=_handle_read_scratchpad,
+    )
+
+    registry.register(
+        name="update_scratchpad",
+        description=(
+            "Update the agent scratchpad for the current project with new content. "
+            "Use this to persist analysis notes, progress updates, key findings, and context "
+            "for future sessions. The content parameter replaces the entire scratchpad. "
+            "Keep it organized with clear headers. "
+            "If no scratchpad exists yet (older projects), one will be created automatically."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The full new content for the scratchpad (replaces existing content)",
+                },
+            },
+            "required": ["content"],
+        },
+        handler=_handle_update_scratchpad,
+    )
+
+    registry.register(
         name="read_project_instructions",
         description=(
             "Read the WAIRZ.md project instructions file. "
@@ -57,6 +94,59 @@ def register_document_tools(registry: ToolRegistry) -> None:
         },
         handler=_handle_read_document,
     )
+
+
+async def _handle_read_scratchpad(input: dict, context: ToolContext) -> str:
+    result = await context.db.execute(
+        select(Document).where(
+            Document.project_id == context.project_id,
+            Document.original_filename == "SCRATCHPAD.md",
+        )
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        return (
+            "No scratchpad exists for this project yet. "
+            "Use update_scratchpad to create one and persist notes for future sessions."
+        )
+
+    content = DocumentService.read_text_content(document)
+    return (
+        "=== Agent Scratchpad ===\n\n"
+        f"{content}\n\n"
+        "=== End Scratchpad ===\n\n"
+        "Use update_scratchpad to update these notes."
+    )
+
+
+async def _handle_update_scratchpad(input: dict, context: ToolContext) -> str:
+    content = input.get("content", "")
+    if not content:
+        return "Error: content is required and cannot be empty."
+
+    # Look for existing scratchpad
+    result = await context.db.execute(
+        select(Document).where(
+            Document.project_id == context.project_id,
+            Document.original_filename == "SCRATCHPAD.md",
+        )
+    )
+    document = result.scalar_one_or_none()
+
+    svc = DocumentService(context.db)
+
+    if document is not None:
+        await svc.update_content(document.id, content)
+    else:
+        # Auto-create for projects that predate this feature
+        await svc.create_note(
+            project_id=context.project_id,
+            title="SCRATCHPAD",
+            content=content,
+        )
+
+    byte_count = len(content.encode("utf-8"))
+    return f"Scratchpad updated successfully ({byte_count} bytes)."
 
 
 async def _handle_read_instructions(input: dict, context: ToolContext) -> str:

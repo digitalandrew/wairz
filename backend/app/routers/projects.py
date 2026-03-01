@@ -17,6 +17,17 @@ from app.services.document_service import DocumentService
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
+SCRATCHPAD_MD_TEMPLATE = """\
+# Agent Scratchpad
+
+This document is used by AI agents to persist analysis notes, progress, and context across sessions.
+Agents will read this at the start of each session and update it as they work.
+
+---
+
+*No notes yet.*
+"""
+
 WAIRZ_MD_TEMPLATE = """\
 # WAIRZ.md — Project Instructions
 
@@ -45,6 +56,13 @@ async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)
         project_id=project.id,
         title="WAIRZ",
         content=WAIRZ_MD_TEMPLATE,
+    )
+
+    # Create default SCRATCHPAD.md note
+    await doc_svc.create_note(
+        project_id=project.id,
+        title="SCRATCHPAD",
+        content=SCRATCHPAD_MD_TEMPLATE,
     )
 
     # Load firmware relationship (empty for new project)
