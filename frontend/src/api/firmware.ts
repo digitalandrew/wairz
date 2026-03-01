@@ -47,6 +47,18 @@ export async function getSingleFirmware(
   return data
 }
 
+export async function updateFirmware(
+  projectId: string,
+  firmwareId: string,
+  data: { version_label?: string | null },
+): Promise<FirmwareDetail> {
+  const { data: result } = await apiClient.patch<FirmwareDetail>(
+    `/projects/${projectId}/firmware/${firmwareId}`,
+    data,
+  )
+  return result
+}
+
 export async function deleteFirmware(
   projectId: string,
   firmwareId: string,

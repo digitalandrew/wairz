@@ -15,6 +15,10 @@ class FirmwareUploadResponse(BaseModel):
     created_at: datetime
 
 
+class FirmwareUpdate(BaseModel):
+    version_label: str | None = None
+
+
 class FirmwareDetailResponse(BaseModel):
     model_config = {"from_attributes": True}
 

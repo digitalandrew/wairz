@@ -13,6 +13,7 @@ from app.models.project import Project
 from app.schemas.firmware import (
     FirmwareDetailResponse,
     FirmwareMetadataResponse,
+    FirmwareUpdate,
     FirmwareUploadResponse,
 )
 from app.services.firmware_metadata_service import FirmwareMetadataService
@@ -56,6 +57,23 @@ async def get_single_firmware(
     firmware = await service.get_by_id(firmware_id)
     if not firmware or firmware.project_id != project_id:
         raise HTTPException(404, "Firmware not found")
+    return firmware
+
+
+@router.patch("/{firmware_id}", response_model=FirmwareDetailResponse)
+async def update_firmware(
+    project_id: uuid.UUID,
+    firmware_id: uuid.UUID,
+    data: FirmwareUpdate,
+    service: FirmwareService = Depends(get_firmware_service),
+):
+    firmware = await service.get_by_id(firmware_id)
+    if not firmware or firmware.project_id != project_id:
+        raise HTTPException(404, "Firmware not found")
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(firmware, key, value)
+    await service.db.flush()
     return firmware
 
 

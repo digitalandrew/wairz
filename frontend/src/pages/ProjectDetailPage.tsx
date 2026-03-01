@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -15,12 +15,16 @@ import {
   Plus,
   Tag,
   Download,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react'
 import { useProjectStore } from '@/stores/projectStore'
-import { listFirmware, deleteFirmware } from '@/api/firmware'
+import { listFirmware, deleteFirmware, updateFirmware } from '@/api/firmware'
 import type { FirmwareDetail } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatFileSize, formatDate } from '@/utils/format'
 import FirmwareUpload from '@/components/projects/FirmwareUpload'
@@ -53,6 +57,9 @@ export default function ProjectDetailPage() {
   const [showUpload, setShowUpload] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
+  const [editingVersionLabel, setEditingVersionLabel] = useState<string | null>(null)
+  const [versionLabelDraft, setVersionLabelDraft] = useState('')
+  const versionInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (projectId) fetchProject(projectId)
@@ -146,6 +153,25 @@ export default function ProjectDetailPage() {
     }
   }
 
+  const startEditingVersionLabel = (fwId: string, current: string | null) => {
+    setEditingVersionLabel(fwId)
+    setVersionLabelDraft(current ?? '')
+    setTimeout(() => versionInputRef.current?.focus(), 0)
+  }
+
+  const saveVersionLabel = async (fwId: string) => {
+    if (!projectId) return
+    const label = versionLabelDraft.trim() || null
+    try {
+      await updateFirmware(projectId, fwId, { version_label: label })
+      fetchProject(projectId)
+      listFirmware(projectId).then(setFirmwareList).catch(() => {})
+    } catch {
+      // error handled by caller
+    }
+    setEditingVersionLabel(null)
+  }
+
   const handleUploadComplete = () => {
     setShowUpload(false)
     if (projectId) {
@@ -226,11 +252,46 @@ export default function ProjectDetailPage() {
                     <CardTitle className="text-base flex items-center gap-2">
                       <FileText className="h-4 w-4" />
                       {fw.original_filename}
-                      {fw.version_label && (
-                        <Badge variant="secondary" className="text-xs">
+                      {editingVersionLabel === fw.id ? (
+                        <span className="inline-flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <Input
+                            ref={versionInputRef}
+                            value={versionLabelDraft}
+                            onChange={(e) => setVersionLabelDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') saveVersionLabel(fw.id)
+                              if (e.key === 'Escape') setEditingVersionLabel(null)
+                            }}
+                            placeholder="e.g. v1.0.3"
+                            className="h-6 w-32 text-xs"
+                          />
+                          <Button size="icon" variant="ghost" className="h-5 w-5" onClick={() => saveVersionLabel(fw.id)}>
+                            <Check className="h-3 w-3" />
+                          </Button>
+                          <Button size="icon" variant="ghost" className="h-5 w-5" onClick={() => setEditingVersionLabel(null)}>
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </span>
+                      ) : fw.version_label ? (
+                        <Badge
+                          variant="secondary"
+                          className="text-xs cursor-pointer hover:bg-secondary/80"
+                          onClick={() => startEditingVersionLabel(fw.id, fw.version_label ?? null)}
+                        >
                           <Tag className="mr-1 h-3 w-3" />
                           {fw.version_label}
+                          <Pencil className="ml-1 h-2.5 w-2.5 opacity-50" />
                         </Badge>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-5 px-1.5 text-xs text-muted-foreground"
+                          onClick={() => startEditingVersionLabel(fw.id, null)}
+                        >
+                          <Tag className="mr-1 h-3 w-3" />
+                          Add version
+                        </Button>
                       )}
                       {isUnpacked && (
                         <Badge variant="default" className="text-xs">unpacked</Badge>
@@ -316,7 +377,7 @@ export default function ProjectDetailPage() {
             <FirmwareUpload
               projectId={project.id}
               onComplete={handleUploadComplete}
-              showVersionLabel={firmware.length > 0}
+              showVersionLabel
             />
           </CardContent>
         </Card>
